@@ -1,0 +1,82 @@
+# ============================================================
+# ROOT .gitignore — AI Recruitment System
+# ============================================================
+
+# ── Secrets & credentials (NEVER commit these) ──────────────
+**/.env
+**/.env.local
+**/.env.production
+**/.env.development
+**/credentials.json
+**/token.json
+**/service_account.json
+**/*.pem
+**/*.key
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+.eggs/
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+
+# ── Node / Frontend ──────────────────────────────────────────
+node_modules/
+Frontend/dist/
+Frontend/dist-ssr/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Editor & OS ──────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Misc generated files ─────────────────────────────────────
+*.zip
+*.tar.gz
+processed_*.json
+processed_*.txt
+recruitment_automation_state.json
+Backend/incoming_resumes/
+Backend/resume.pdf
+src_old/
+Frontend/src_old/
+.env

@@ -1,0 +1,52 @@
+# render.yaml — Render Blueprint for AI Recruitment System
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  # ── Backend: FastAPI Python Web Service ───────────────────────────────────
+  - type: web
+    name: ai-recruitment-backend
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: Backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false            # You will set this in the Render dashboard
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        # After deploying the frontend, set this to your Render frontend URL
+        # e.g. https://ai-recruitment-frontend.onrender.com,http://localhost:5173
+        sync: false
+    healthCheckPath: /docs
+
+  # ── Frontend: React + Vite Static Site ───────────────────────────────────
+  - type: web
+    name: ai-recruitment-frontend
+    runtime: static
+    region: oregon
+    plan: free
+    rootDir: Frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        # Set this to your backend Render URL after deploying the backend
+        # e.g. https://ai-recruitment-backend.onrender.com
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

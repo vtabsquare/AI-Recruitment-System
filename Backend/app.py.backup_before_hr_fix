@@ -1,0 +1,1292 @@
+from collections import Counter
+from typing import Optional
+import os
+from datetime import datetime, timezone
+import hashlib
+import uuid
+import re
+from pathlib import Path
+import secrets
+
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+
+from supabase_db import supabase
+from interview_feedback_service import save_interview_feedback
+from interview_ai_evaluator import evaluate_interview_feedback
+from interview_decision_email_service import send_final_interview_decision_email
+from email_service import send_email
+
+try:
+    from ai_analyzer import client as gemini_client
+except Exception:
+    gemini_client = None
+
+app = FastAPI(
+    title="VTAB Square AI Recruitment API",
+    version="1.2.0",
+    description="Backend API for the VTAB Square AI recruitment workflow.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=1)
+
+
+class AIChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+
+
+class InterviewFeedbackRequest(BaseModel):
+    application_id: str = Field(..., min_length=1)
+    reviewer_name: str = Field(..., min_length=1)
+    technical_skills: int = Field(..., ge=1, le=5)
+    communication: int = Field(..., ge=1, le=5)
+    problem_solving: int = Field(..., ge=1, le=5)
+    overall_performance: int = Field(..., ge=1, le=5)
+    recommendation: str = Field(..., min_length=1)
+    reviewer_comments: Optional[str] = ""
+
+
+class CandidateDecisionRequest(BaseModel):
+    application_id: str = Field(..., min_length=1)
+    decision: str = Field(..., min_length=1)
+    comments: Optional[str] = ""
+
+
+def select_all(table_name: str, order_column: Optional[str] = None, descending: bool = True):
+    query = supabase.table(table_name).select("*")
+    if order_column:
+        query = query.order(order_column, desc=descending)
+    return query.execute().data or []
+
+
+def select_one(table_name: str, record_id: str):
+    response = supabase.table(table_name).select("*").eq("id", record_id).limit(1).execute()
+    return response.data[0] if response.data else None
+
+
+def safe_select_all(table_name: str, order_column: Optional[str] = None):
+    try:
+        return {"available": True, "data": select_all(table_name, order_column)}
+    except Exception as error:
+        return {
+            "available": False,
+            "data": [],
+            "message": f"{table_name} is not available yet.",
+            "error": str(error),
+        }
+
+
+# ------------------------- AUTH -------------------------
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest):
+    try:
+        email = request.email.strip().lower()
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": request.password,
+        })
+        session = getattr(auth_response, "session", None)
+        user = getattr(auth_response, "user", None)
+        if not session or not user:
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+        staff_response = (
+            supabase.table("staff_users")
+            .select("id, full_name, email, role, is_active")
+            .eq("email", email)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        if not staff_response.data:
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            raise HTTPException(status_code=403, detail="Authenticated user is not an active staff member.")
+
+        staff = staff_response.data[0]
+        role = str(staff.get("role", "")).lower()
+        if role not in {"manager", "hr", "admin"}:
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            raise HTTPException(status_code=403, detail="Only Manager, HR, or Admin accounts can access this portal.")
+
+        return {
+            "success": True,
+            "message": "Login successful.",
+            "staff": staff,
+            "access_token": getattr(session, "access_token", None),
+            "refresh_token": getattr(session, "refresh_token", None),
+            "token_type": "bearer",
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=401, detail=f"Login failed: {error}")
+
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_staff(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)):
+    if not credentials or not credentials.credentials.strip():
+        raise HTTPException(status_code=401, detail="Authorization header is required.")
+    token = credentials.credentials.strip()
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = getattr(user_response, "user", None)
+        if not user or not getattr(user, "email", None):
+            raise HTTPException(status_code=401, detail="Invalid or expired access token.")
+
+        staff_response = (
+            supabase.table("staff_users")
+            .select("id, full_name, email, role, is_active")
+            .eq("email", user.email.lower())
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        if not staff_response.data:
+            raise HTTPException(status_code=403, detail="Staff account not found or inactive.")
+        return staff_response.data[0]
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {error}")
+
+
+def require_staff(staff=Depends(get_current_staff)):
+    return staff
+
+
+def require_manager(staff=Depends(get_current_staff)):
+    if str(staff.get("role", "")).lower() not in {"manager", "admin"}:
+        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    return staff
+
+
+def require_hr(staff=Depends(get_current_staff)):
+    if str(staff.get("role", "")).lower() not in {"hr", "admin"}:
+        raise HTTPException(status_code=403, detail="HR/Admin access required.")
+    return staff
+
+
+# ------------------------- ROOT -------------------------
+
+@app.get("/")
+def root():
+    return {"status": "running", "service": "VTAB Square AI Recruitment API", "version": "1.2.0"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+
+# ------------------------- AI EVALUATIONS -------------------------
+
+
+def get_evaluations_for_applications(application_ids):
+    """Return the newest persisted AI eligibility evaluation per application."""
+    if not application_ids:
+        return {}
+    try:
+        response = (
+            supabase.table("ai_evaluations")
+            .select("*")
+            .in_("application_id", application_ids)
+            .order("evaluated_at", desc=True)
+            .execute()
+        )
+        result = {}
+        for row in response.data or []:
+            application_id = row.get("application_id")
+            if application_id and application_id not in result:
+                result[application_id] = row
+        return result
+    except Exception:
+        # Keep the portal usable if the table has not been created/populated yet.
+        return {}
+
+
+def build_ai_summary(evaluation):
+    if not evaluation:
+        return {
+            "available": False,
+            "decision": None,
+            "matched_skills": [],
+            "missing_skills": [],
+            "cgpa_eligible": None,
+            "skills_eligible": None,
+            "overall_eligible": None,
+            "reason": None,
+            "evaluated_at": None,
+        }
+    return {
+        "available": True,
+        "decision": evaluation.get("decision"),
+        "matched_skills": evaluation.get("matched_skills") or [],
+        "missing_skills": evaluation.get("missing_skills") or [],
+        "cgpa_eligible": evaluation.get("cgpa_eligible"),
+        "skills_eligible": evaluation.get("skills_eligible"),
+        "overall_eligible": evaluation.get("overall_eligible"),
+        "reason": evaluation.get("reason"),
+        "evaluated_at": evaluation.get("evaluated_at"),
+    }
+
+
+def enrich_application(application, candidate, role, evaluation):
+    return {
+        "application": application,
+        "candidate": candidate,
+        "job_role": role,
+        "ai_evaluation": evaluation,
+        "ai_summary": build_ai_summary(evaluation),
+        "manager_view": {
+            "application_id": application.get("application_id"),
+            "status": application.get("status"),
+            "candidate_name": candidate.get("candidate_name"),
+            "email": candidate.get("email"),
+            "role": role.get("role_name"),
+            "ai_decision": evaluation.get("decision") if evaluation else None,
+            "overall_eligible": evaluation.get("overall_eligible") if evaluation else None,
+        },
+    }
+
+
+# ------------------------- CANDIDATES -------------------------
+
+@app.get("/api/candidates")
+def get_candidates(staff=Depends(require_manager)):
+    try:
+        applications = select_all("applications", order_column="applied_at")
+        candidates = select_all("candidates")
+        roles = select_all("job_roles")
+        candidate_map = {x.get("id"): x for x in candidates}
+        role_map = {x.get("id"): x for x in roles}
+        application_ids = [x.get("id") for x in applications if x.get("id")]
+        evaluation_map = get_evaluations_for_applications(application_ids)
+
+        result = []
+        for application in applications:
+            candidate = candidate_map.get(application.get("candidate_id"), {})
+            role = role_map.get(application.get("job_role_id"), {})
+            evaluation = evaluation_map.get(application.get("id"))
+            result.append(enrich_application(application, candidate, role, evaluation))
+
+        return {
+            "success": True,
+            "count": len(result),
+            "items": result,
+            "requested_by": staff.get("role"),
+        }
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/api/candidates/{candidate_id}")
+def get_candidate(candidate_id: str, staff=Depends(require_manager)):
+    try:
+        candidate = select_one("candidates", candidate_id)
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found.")
+
+        applications_response = (
+            supabase.table("applications")
+            .select("*")
+            .eq("candidate_id", candidate_id)
+            .order("applied_at", desc=True)
+            .execute()
+        )
+        applications = applications_response.data or []
+        roles = select_all("job_roles")
+        role_map = {x.get("id"): x for x in roles}
+        application_ids = [x.get("id") for x in applications if x.get("id")]
+        evaluation_map = get_evaluations_for_applications(application_ids)
+
+        enriched = []
+        for application in applications:
+            role = role_map.get(application.get("job_role_id"), {})
+            evaluation = evaluation_map.get(application.get("id"))
+            enriched.append(enrich_application(application, candidate, role, evaluation))
+
+        return {"success": True, "candidate": candidate, "applications": enriched}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+# ------------------------- HUMAN MANAGER DECISION -------------------------
+
+@app.post("/api/manager/candidate-decision")
+def manager_candidate_decision(request: CandidateDecisionRequest, staff=Depends(require_manager)):
+    decision = request.decision.strip().lower()
+    allowed = {
+        "approve": "interview_pending",
+        "approved": "interview_pending",
+        "reject": "rejected",
+        "rejected": "rejected",
+        "next_round": "interview_pending",
+        "next round": "interview_pending",
+    }
+    if decision not in allowed:
+        raise HTTPException(status_code=400, detail="Decision must be approve, reject, or next_round.")
+
+    try:
+        existing = (
+            supabase.table("applications")
+            .select("*")
+            .eq("id", request.application_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Application not found.")
+
+        updated = (
+            supabase.table("applications")
+            .update({"status": allowed[decision]})
+            .eq("id", request.application_id)
+            .execute()
+        )
+        if not updated.data:
+            raise HTTPException(status_code=500, detail="Application decision could not be saved.")
+
+        return {
+            "success": True,
+            "message": "Manager decision recorded.",
+            "decision": decision,
+            "application": updated.data[0],
+            "reviewer": {
+                "id": staff.get("id"),
+                "name": staff.get("full_name"),
+                "role": staff.get("role"),
+            },
+            "comments": request.comments or "",
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+# ------------------------- INTERVIEWS -------------------------
+
+@app.get("/api/interviews")
+def get_interviews(staff=Depends(require_manager)):
+    try:
+        interviews = select_all("interviews", order_column="scheduled_at")
+        candidates = select_all("candidates")
+        roles = select_all("job_roles")
+        staff_users = select_all("staff_users")
+        candidate_map = {x.get("id"): x for x in candidates}
+        role_map = {x.get("id"): x for x in roles}
+        staff_map = {x.get("id"): x for x in staff_users}
+        items = []
+        for interview in interviews:
+            candidate = candidate_map.get(interview.get("candidate_id"), {})
+            role = role_map.get(interview.get("job_role_id"), {})
+            interviewer = staff_map.get(interview.get("interviewer_id"), {})
+            items.append({
+                **interview,
+                "candidate_name": candidate.get("candidate_name"),
+                "candidate_email": candidate.get("email"),
+                "job_role": role.get("role_name"),
+                "interviewer_name": interviewer.get("full_name"),
+                "interviewer_email": interviewer.get("email"),
+            })
+        return {"success": True, "count": len(items), "items": items}
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/api/interviews/{interview_id}")
+def get_interview(interview_id: str, staff=Depends(require_manager)):
+    try:
+        interview = select_one("interviews", interview_id)
+        if not interview:
+            raise HTTPException(status_code=404, detail="Interview not found.")
+        return {"success": True, "interview": interview}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+# ------------------------- INTERVIEW FEEDBACK -------------------------
+
+@app.post("/api/interview-feedback")
+def submit_interview_feedback(
+    feedback: InterviewFeedbackRequest,
+    staff=Depends(require_manager)
+):
+    try:
+        # ---------------------------------------------------------
+        # 1. SAVE MANAGER INTERVIEW FEEDBACK
+        # ---------------------------------------------------------
+        saved_feedback = save_interview_feedback(
+            application_id=feedback.application_id,
+            reviewer_name=feedback.reviewer_name,
+            technical_skills=feedback.technical_skills,
+            communication=feedback.communication,
+            problem_solving=feedback.problem_solving,
+            overall_performance=feedback.overall_performance,
+            recommendation=feedback.recommendation,
+            reviewer_comments=feedback.reviewer_comments or "",
+        )
+
+        # ---------------------------------------------------------
+        # 2. AI EVALUATES THE INTERVIEW
+        # ---------------------------------------------------------
+        ai_result = evaluate_interview_feedback(
+            feedback.application_id
+        )
+
+        final_decision = ai_result["final_decision"]
+
+        print("==============================================")
+        print("INTERVIEW FEEDBACK PROCESSING")
+        print("Application:", feedback.application_id)
+        print("AI Decision:", final_decision)
+        print("==============================================")
+
+        # ---------------------------------------------------------
+        # 3. UPDATE APPLICATION STATUS
+        # ---------------------------------------------------------
+        #
+        # This is the missing part.
+        #
+        # Gemini returns:
+        #     selected
+        #     rejected
+        #     next_round
+        #
+        # We convert that into the application's workflow status.
+        # ---------------------------------------------------------
+
+        decision = str(final_decision or "").strip().lower()
+
+        if decision == "selected":
+            # Gemini returns "selected", but the database application_status
+            # enum does not contain "selected". Use "approved" for the HR stage.
+            new_application_status = "documents_pending"
+
+        elif decision == "rejected":
+            new_application_status = "rejected"
+
+        elif decision in ["next_round", "next round"]:
+            new_application_status = "interview_pending"
+
+        else:
+            # Keep the current workflow safe if Gemini returns
+            # an unexpected decision.
+            new_application_status = "interview_completed"
+
+        print("Updating application status...")
+        print("New status:", new_application_status)
+
+        status_response = (
+            supabase
+            .table("applications")
+            .update({
+                "status": new_application_status
+            })
+            .eq("id", feedback.application_id)
+            .execute()
+        )
+
+        if not status_response.data:
+            raise ValueError(
+                "Interview feedback was saved, but the application "
+                "status could not be updated."
+            )
+
+        updated_application = status_response.data[0]
+
+        print("Application status updated successfully.")
+        print("Application ID:", updated_application.get("application_id"))
+        print("Status:", updated_application.get("status"))
+
+        # ---------------------------------------------------------
+        # 4. SEND FINAL DECISION EMAIL
+        # ---------------------------------------------------------
+        email_result = send_final_interview_decision_email(
+            application_id=feedback.application_id,
+            final_decision=final_decision,
+        )
+
+        # ---------------------------------------------------------
+        # 5. CREATE DOCUMENT REQUEST FOR SELECTED CANDIDATE
+        # ---------------------------------------------------------
+        document_request = None
+        document_email = None
+
+        if decision == "selected":
+            application = updated_application
+
+            candidate = select_one(
+                "candidates",
+                application.get("candidate_id")
+            )
+
+            role = select_one(
+                "job_roles",
+                application.get("job_role_id")
+            )
+
+            if not candidate:
+                raise ValueError("Candidate record not found.")
+
+            raw_token = secrets.token_urlsafe(32)
+
+            existing_request = _get_existing_document_request(
+                feedback.application_id
+            )
+
+            if existing_request:
+                document_request = existing_request
+                print("Document request already exists.")
+            else:
+                document_request = create_document_request(
+                    application_id=feedback.application_id,
+                    candidate_id=application.get("candidate_id"),
+                    token=raw_token,
+                )
+
+                document_email = send_document_request_email(
+                    candidate_name=candidate.get("candidate_name"),
+                    recipient_email=candidate.get("email"),
+                    job_role=role.get("role_name") if role else "the position",
+                    application_id=application.get("application_id"),
+                    token=raw_token,
+                )
+
+                print("DOCUMENT_REQUEST_SENT")
+
+        # ---------------------------------------------------------
+        # 6. RETURN COMPLETE RESULT
+        # ---------------------------------------------------------
+        return {
+            "success": True,
+            "message": "Interview feedback processed successfully.",
+            "feedback": saved_feedback,
+            "ai_evaluation": ai_result,
+            "application": updated_application,
+            "email": email_result,
+            "document_request": document_request,
+            "document_email": document_email,
+            "processed_by": {
+                "staff_id": staff.get("id"),
+                "staff_name": staff.get("full_name"),
+                "role": staff.get("role"),
+            },
+        }
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+    except Exception as error:
+        print("INTERVIEW FEEDBACK ERROR:", error)
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
+# ------------------------- ANALYTICS -------------------------
+
+@app.get("/api/manager/analytics")
+def manager_analytics(staff=Depends(require_manager)):
+    try:
+        applications = select_all("applications")
+        interviews = select_all("interviews")
+        feedback = select_all("interview_feedback")
+        application_statuses = Counter(str(x.get("status", "unknown")).lower() for x in applications)
+        interview_statuses = Counter(str(x.get("status", "unknown")).lower() for x in interviews)
+        scores = []
+        for item in feedback:
+            try:
+                scores.append(float(item.get("overall_performance")))
+            except (TypeError, ValueError):
+                pass
+        average = round(sum(scores) / len(scores), 2) if scores else None
+        try:
+            evaluations = select_all("ai_evaluations")
+            ai_statuses = Counter(str(x.get("decision", "unknown")).lower() for x in evaluations)
+        except Exception:
+            ai_statuses = Counter()
+
+        return {
+            "success": True,
+            "analytics": {
+                "total_applications": len(applications),
+                "total_interviews": len(interviews),
+                "completed_feedback": len(feedback),
+                "average_overall_performance": average,
+                "applications_by_status": dict(application_statuses),
+                "interviews_by_status": dict(interview_statuses),
+                "ai_eligibility_by_decision": dict(ai_statuses),
+                "shortlisted": application_statuses.get("shortlisted", 0),
+                "rejected": application_statuses.get("rejected", 0),
+                "interview_scheduled": interview_statuses.get("scheduled", 0),
+                "interview_completed": interview_statuses.get("completed", 0),
+            },
+            "generated_for": {"staff_id": staff.get("id"), "role": staff.get("role")},
+        }
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+
+
+@app.get("/api/hr/offer-approvals")
+def hr_offer_approvals(staff=Depends(require_hr)):
+    """Return applications that have reached the HR offer stage."""
+    try:
+        applications = select_all("applications", order_column="updated_at")
+        candidates = select_all("candidates")
+        roles = select_all("job_roles")
+
+        candidate_map = {item.get("id"): item for item in candidates}
+        role_map = {item.get("id"): item for item in roles}
+        application_ids = [item.get("id") for item in applications if item.get("id")]
+        evaluation_map = get_evaluations_for_applications(application_ids)
+
+        hr_statuses = {"documents_pending", "documents_verifying", "onboarding"}
+        items = []
+
+        for application in applications:
+            status = str(application.get("status", "")).lower()
+            if status not in hr_statuses:
+                continue
+
+            candidate = candidate_map.get(application.get("candidate_id"), {})
+            role = role_map.get(application.get("job_role_id"), {})
+            evaluation = evaluation_map.get(application.get("id"))
+
+            items.append(
+                enrich_application(application, candidate, role, evaluation)
+            )
+
+        return {
+            "success": True,
+            "count": len(items),
+            "items": items,
+            "requested_by": staff.get("role"),
+        }
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+# ------------------------- HR -------------------------
+
+@app.get("/api/hr/employees")
+def hr_employees(staff=Depends(require_hr)):
+    return {"success": True, **safe_select_all("employees", order_column="created_at")}
+
+
+@app.get("/api/hr/audit-logs")
+def hr_audit_logs(staff=Depends(require_hr)):
+    return {"success": True, **safe_select_all("audit_logs", order_column="created_at")}
+
+
+# ------------------------- CANDIDATE AI -------------------------
+
+@app.post("/api/candidate-ai")
+def candidate_ai(request: AIChatRequest):
+    if gemini_client is None:
+        raise HTTPException(status_code=503, detail="Gemini AI service is not available.")
+
+    prompt = f"""
+You are the VTAB Square candidate-facing recruitment and onboarding assistant.
+Only answer approved recruitment/onboarding questions. Do not make hiring
+or document decisions, change status, schedule interviews, reveal confidential
+information, or invent policies, dates, salary, benefits, or documents.
+If information is unavailable, say: I don't have that information available.
+Please contact VTAB Square HR for clarification.
+
+Approved company/process information:
+No additional policy text has been supplied to this endpoint yet.
+
+Candidate question:
+{request.question.strip()}
+"""
+    try:
+        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        response = gemini_client.models.generate_content(model=model, contents=prompt)
+        text = response.text.strip() if response and response.text else ""
+        if not text:
+            raise ValueError("Gemini returned an empty response.")
+        return {
+            "success": True,
+            "answer": text,
+            "assistant_scope": "candidate_recruitment_and_onboarding",
+        }
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"AI assistant failed: {error}")
+
+# ------------------------- DOCUMENT REQUEST EMAIL -------------------------
+
+def send_document_request_email(
+    candidate_name,
+    recipient_email,
+    job_role,
+    application_id,
+    token,
+):
+    candidate_name = str(candidate_name or "Candidate").strip()
+    recipient_email = str(recipient_email or "").strip()
+    job_role = str(job_role or "the position").strip()
+    application_id = str(application_id or "").strip()
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:5173",
+    ).rstrip("/")
+
+    upload_url = f"{frontend_url}/documents?token={token}"
+
+    return send_email(
+        recipient_email=recipient_email,
+        recipient_name=candidate_name,
+        subject="VTAB Square | Document Submission Required",
+        html_content=f"""
+        <html>
+        <body style="font-family:Arial,sans-serif;line-height:1.6;">
+            <h2>Document Submission Required</h2>
+            <p>Dear {candidate_name},</p>
+            <p>
+                Congratulations. You have successfully completed the
+                interview stage for the <strong>{job_role}</strong>
+                position at VTAB Square.
+            </p>
+            <p>
+                Please use the secure link below to submit your requested
+                documents.
+            </p>
+            <p>
+                <a href="{upload_url}"
+                   style="display:inline-block;padding:12px 18px;
+                   background:#6d5ce7;color:white;text-decoration:none;
+                   border-radius:8px;">
+                    Submit Documents
+                </a>
+            </p>
+            <p><strong>Application ID:</strong> {application_id}</p>
+            <p>This secure link expires in 7 days.</p>
+            <p>Regards,<br>VTAB Square HR Team</p>
+        </body>
+        </html>
+        """,
+        text_content=f"""
+Dear {candidate_name},
+
+Congratulations. You have successfully completed the interview stage
+for the {job_role} position at VTAB Square.
+
+Submit your required documents here:
+{upload_url}
+
+Application ID: {application_id}
+
+This secure link expires in 7 days.
+
+Regards,
+VTAB Square HR Team
+""".strip(),
+    )
+
+
+# ------------------------- DOCUMENT WORKFLOW -------------------------
+
+DOCUMENT_BUCKET = "candidate-documents"
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
+
+
+def _hash_document_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _get_existing_document_request(application_id: str):
+    response = (
+        supabase.table("document_requests")
+        .select("*")
+        .eq("application_id", application_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return response.data[0] if response.data else None
+
+
+def create_document_request(
+    application_id: str,
+    candidate_id: str,
+    token: str,
+):
+    token_hash = _hash_document_token(token)
+
+    response = (
+        supabase.table("document_requests")
+        .insert({
+            "application_id": application_id,
+            "candidate_id": candidate_id,
+            "token_hash": token_hash,
+            "status": "pending",
+        })
+        .execute()
+    )
+
+    if not response.data:
+        raise ValueError("Document request could not be created.")
+
+    return response.data[0]
+
+
+def _create_and_send_document_request(application_id: str):
+    application_response = (
+        supabase.table("applications")
+        .select("*")
+        .eq("id", application_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not application_response.data:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    application = application_response.data[0]
+    status = str(application.get("status", "")).lower()
+
+    if status != "documents_pending":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Document request can only be created for "
+                f"'documents_pending' applications. Current status: {status}"
+            ),
+        )
+
+    existing = _get_existing_document_request(application_id)
+    if existing:
+        return {
+            "request": existing,
+            "email": None,
+            "already_exists": True,
+        }
+
+    candidate = select_one("candidates", application.get("candidate_id", ""))
+    role = select_one("job_roles", application.get("job_role_id", ""))
+
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+
+    raw_token = secrets.token_urlsafe(32)
+
+    request_row = create_document_request(
+        application_id=application_id,
+        candidate_id=application.get("candidate_id"),
+        token=raw_token,
+    )
+
+    email_result = send_document_request_email(
+        candidate_name=candidate.get("candidate_name"),
+        recipient_email=candidate.get("email"),
+        job_role=role.get("role_name") if role else "the position",
+        application_id=application.get("application_id"),
+        token=raw_token,
+    )
+
+    print("DOCUMENT_REQUEST_CREATED")
+    print("Application ID:", application.get("application_id"))
+    print("Document request ID:", request_row.get("id"))
+    print("DOCUMENT_REQUEST_EMAIL_SENT")
+
+    return {
+        "request": request_row,
+        "email": email_result,
+        "already_exists": False,
+    }
+
+
+@app.post("/api/document-request/create/{application_id}")
+def create_document_request_for_application(
+    application_id: str,
+    staff=Depends(require_manager),
+):
+    try:
+        result = _create_and_send_document_request(application_id)
+        return {
+            "success": True,
+            "message": (
+                "Document request already exists."
+                if result["already_exists"]
+                else "Document request created and email sent successfully."
+            ),
+            **result,
+            "processed_by": {
+                "staff_id": staff.get("id"),
+                "staff_name": staff.get("full_name"),
+                "role": staff.get("role"),
+            },
+        }
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        print("DOCUMENT REQUEST ERROR:", error)
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/api/document-request")
+def get_document_request(token: str):
+    try:
+        response = (
+            supabase.table("document_requests")
+            .select("id,candidate_id,application_id,status,expires_at")
+            .eq("token_hash", _hash_document_token(token.strip()))
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Invalid document submission link.",
+            )
+
+        request = response.data[0]
+
+        if request.get("status") != "pending":
+            raise HTTPException(
+                status_code=400,
+                detail="This submission link is no longer active.",
+            )
+
+        expires_at = request.get("expires_at")
+        if expires_at:
+            try:
+                expires = datetime.fromisoformat(
+                    str(expires_at).replace("Z", "+00:00")
+                )
+                if expires < datetime.now(timezone.utc):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This document submission link has expired.",
+                    )
+            except ValueError:
+                pass
+
+        candidate = select_one("candidates", request.get("candidate_id", ""))
+
+        requirements = (
+            supabase.table("document_requirements")
+            .select("id,document_name,description,is_required")
+            .eq("is_active", True)
+            .order("document_name")
+            .execute()
+        )
+
+        return {
+            "success": True,
+            "candidate": {
+                "id": candidate.get("id") if candidate else None,
+                "name": candidate.get("candidate_name") if candidate else None,
+                "email": candidate.get("email") if candidate else None,
+            },
+            "requirements": requirements.data or [],
+            "request": request,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.post("/api/document-upload")
+async def public_document_upload(
+    token: str = Form(...),
+    document_name: str = Form(...),
+    file: UploadFile = File(...),
+):
+    try:
+        response = (
+            supabase.table("document_requests")
+            .select("*")
+            .eq("token_hash", _hash_document_token(token.strip()))
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Invalid document submission link.",
+            )
+
+        request = response.data[0]
+
+        if request.get("status") != "pending":
+            raise HTTPException(
+                status_code=400,
+                detail="This submission link is no longer active.",
+            )
+
+        filename = file.filename or "document"
+        extension = Path(filename).suffix.lower()
+
+        if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF, PNG, JPG, and JPEG files are allowed.",
+            )
+
+        content = await file.read()
+
+        if not content:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded document is empty.",
+            )
+
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum document size is 10 MB.",
+            )
+
+        document_id = str(uuid.uuid4())
+        safe_filename = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "_",
+            filename,
+        )
+        storage_path = (
+            f"{request['candidate_id']}/"
+            f"{document_id}_{safe_filename}"
+        )
+
+        supabase.storage.from_(DOCUMENT_BUCKET).upload(
+            storage_path,
+            content,
+            file_options={
+                "content-type": (
+                    file.content_type
+                    or "application/octet-stream"
+                ),
+                "upsert": "false",
+            },
+        )
+
+        req = (
+            supabase.table("document_requirements")
+            .select("id")
+            .eq("document_name", document_name.strip())
+            .limit(1)
+            .execute()
+        )
+
+        requirement_id = (
+            req.data[0]["id"]
+            if req.data
+            else None
+        )
+
+        saved = (
+            supabase.table("documents")
+            .insert({
+                "id": document_id,
+                "candidate_id": request["candidate_id"],
+                "application_id": request["application_id"],
+                "requirement_id": requirement_id,
+                "document_name": document_name.strip(),
+                "storage_path": storage_path,
+                "verification_status": "uploaded",
+            })
+            .execute()
+        )
+
+        if not saved.data:
+            raise ValueError(
+                "Document record could not be created."
+            )
+
+        supabase.table("applications").update(
+            {"status": "documents_verifying"}
+        ).eq(
+            "id",
+            request["application_id"],
+        ).execute()
+
+        return {
+            "success": True,
+            "message": "Document uploaded successfully.",
+            "document": saved.data[0],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+
+
+@app.get("/api/hr/document-verification")
+def hr_document_verification(staff=Depends(require_hr)):
+    try:
+        response = (
+            supabase.table("documents")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        return {
+            "success": True,
+            "count": len(response.data or []),
+            "items": response.data or [],
+        }
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+
+
+@app.post("/api/documents/{document_id}/verify")
+def hr_verify_document(
+    document_id: str,
+    staff=Depends(require_hr),
+):
+    try:
+        existing = (
+            supabase.table("documents")
+            .select("*")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not existing.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found.",
+            )
+
+        updated = (
+            supabase.table("documents")
+            .update({
+                "verification_status": "hr_review_required",
+                "verification_result": {
+                    "status": "hr_review_required",
+                    "verified_by_ai": False,
+                    "message": "Document is ready for HR review.",
+                },
+            })
+            .eq("id", document_id)
+            .execute()
+        )
+
+        return {
+            "success": True,
+            "document": (
+                updated.data[0]
+                if updated.data
+                else None
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+
+
+@app.post("/api/documents/{document_id}/approve")
+def hr_approve_document(
+    document_id: str,
+    staff=Depends(require_hr),
+):
+    try:
+        existing = (
+            supabase.table("documents")
+            .select("*")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not existing.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found.",
+            )
+
+        updated = (
+            supabase.table("documents")
+            .update({
+                "verification_status": "approved",
+                "verified_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            })
+            .eq("id", document_id)
+            .execute()
+        )
+
+        return {
+            "success": True,
+            "document": (
+                updated.data[0]
+                if updated.data
+                else None
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+
+# ------------------------- RUN DIRECTLY -------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
