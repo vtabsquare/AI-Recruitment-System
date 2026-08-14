@@ -417,20 +417,7 @@ def get_google_credentials():
         )
 
     # ========================================================
-    # CHECK CLIENT CREDENTIALS
-    # ========================================================
-
-    if not os.path.exists(
-        CREDENTIALS_FILE
-    ):
-
-        raise FileNotFoundError(
-            "credentials.json was not found at:\n"
-            f"{CREDENTIALS_FILE}"
-        )
-
-    # ========================================================
-    # LOAD TOKEN
+    # LOAD TOKEN FIRST (Skipping credentials.json if valid)
     # ========================================================
 
     credentials = (
@@ -640,11 +627,25 @@ def get_google_credentials():
 
         credentials = None
 
+        credentials = None
+
     # ========================================================
-    # NEW AUTHORIZATION
+    # NEW AUTHORIZATION (Requires credentials.json)
     # ========================================================
 
-    credentials = authorize_google()
+    if not credentials:
+
+        if not os.path.exists(
+            CREDENTIALS_FILE
+        ):
+
+            raise FileNotFoundError(
+                "Google authentication failed. Existing token was invalid or missing. "
+                "To generate a new token locally, credentials.json must be present at:\n"
+                f"{CREDENTIALS_FILE}"
+            )
+
+        credentials = authorize_google()
 
     print()
     print("=" * 60)
