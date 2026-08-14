@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -65,31 +67,32 @@ print(
 # ============================================================
 
 def load_existing_credentials():
+    """
+    Load OAuth token from env var (Render/production) or file (local dev).
+    GOOGLE_TOKEN_JSON env var should contain the base64-encoded contents of token.json.
+    """
 
-    if not os.path.exists(
-        TOKEN_FILE
-    ):
+    # --- Production: load from environment variable ---
+    token_env = os.getenv("GOOGLE_TOKEN_JSON")
+    if token_env:
+        try:
+            token_data = base64.b64decode(token_env).decode("utf-8")
+            return Credentials.from_authorized_user_info(
+                json.loads(token_data),
+                SCOPES
+            )
+        except Exception as error:
+            print("Could not load token from GOOGLE_TOKEN_JSON env var:", error)
+            return None
+
+    # --- Local dev: load from file ---
+    if not os.path.exists(TOKEN_FILE):
         return None
 
     try:
-
-        return Credentials.from_authorized_user_file(
-            TOKEN_FILE,
-            SCOPES
-        )
-
+        return Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     except Exception as error:
-
-        print()
-        print(
-            "Could not load existing token."
-        )
-
-        print(
-            "Reason:",
-            error
-        )
-
+        print("Could not load existing token from file:", error)
         return None
 
 

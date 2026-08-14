@@ -1,13 +1,17 @@
 import os
+import json
 import base64
 import re
-import json
+import email
+import base64 as b64_module
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 # ============================================================
@@ -87,53 +91,53 @@ IGNORED_SENDER_DOMAINS = {
 def get_gmail_service():
     """
     Create and return the authenticated Gmail API service.
+    Loads token from GOOGLE_TOKEN_JSON env var (production/Render)
+    or from token.json file (local development).
+    Returns None gracefully if credentials are unavailable.
     """
 
     creds = None
 
-    if os.path.exists("token.json"):
-
-        creds = Credentials.from_authorized_user_file(
-            "token.json",
-            SCOPES
-        )
-
-    if not creds or not creds.valid:
-
-        if (
-            creds
-            and creds.expired
-            and creds.refresh_token
-        ):
-
-            creds.refresh(Request())
-
-        else:
-
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json",
+    # --- Production: load from environment variable ---
+    token_env = os.getenv("GOOGLE_TOKEN_JSON")
+    if token_env:
+        try:
+            token_data = base64.b64decode(token_env).decode("utf-8")
+            creds = Credentials.from_authorized_user_info(
+                json.loads(token_data),
                 SCOPES
             )
+        except Exception as error:
+            print("[Gmail] Could not load token from GOOGLE_TOKEN_JSON:", error)
+            return None
 
-            creds = flow.run_local_server(
-                port=0
-            )
+    # --- Local dev: load from file ---
+    elif os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
 
-        with open(
-            "token.json",
-            "w",
-            encoding="utf-8"
-        ) as token:
+    else:
+        print("[Gmail] No credentials available (no GOOGLE_TOKEN_JSON env var and no token.json). Gmail features disabled.")
+        return None
 
-            token.write(
-                creds.to_json()
-            )
+    # Refresh token if expired
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                # Save refreshed token back to file (local dev only)
+                if not token_env and os.path.exists("token.json"):
+                    with open("token.json", "w", encoding="utf-8") as token:
+                        token.write(creds.to_json())
+            except Exception as error:
+                print("[Gmail] Token refresh failed:", error)
+                return None
+        else:
+            # Cannot open browser on server — fail gracefully
+            print("[Gmail] Token invalid and cannot be refreshed. Gmail features disabled.")
+            return None
 
-    return build(
-        "gmail",
-        "v1",
-        credentials=creds
-    )
+    return build("gmail", "v1", credentials=creds)
+
 
 
 # ============================================================
