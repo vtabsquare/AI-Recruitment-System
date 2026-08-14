@@ -66,6 +66,10 @@ PROCESSED_APPLICATION_FILE = (
     "processed_application_emails.json"
 )
 
+# Supabase import for persistent message ID tracking
+from supabase_db import supabase as _supabase
+
+
 
 # ============================================================
 # AUTOMATED / NON-CANDIDATE EMAIL DOMAINS
@@ -683,87 +687,67 @@ def detect_job_role(
 
 
 # ============================================================
-# LOAD PROCESSED APPLICATION EMAIL IDS
+# LOAD PROCESSED APPLICATION EMAIL IDS  (Supabase-backed)
 # ============================================================
 
 def load_processed_application_ids():
-
-    path = Path(
-        PROCESSED_APPLICATION_FILE
-    )
-
-    if not path.exists():
-        return set()
-
+    """
+    Load processed Gmail message IDs from Supabase.
+    Falls back to empty set on error so the pipeline
+    can still run.
+    """
     try:
-
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(
-                file
-            )
-
-        if not isinstance(
-            data,
-            list
-        ):
-
-            return set()
-
-        return set(
-            str(item)
-            for item in data
+        response = (
+            _supabase
+            .table("processed_gmail_messages")
+            .select("message_id")
+            .eq("pipeline", "application")
+            .execute()
         )
-
-    except Exception:
-
+        return {
+            row["message_id"]
+            for row in (response.data or [])
+        }
+    except Exception as err:
+        print("[Gmail] Could not load processed IDs from Supabase:", err)
         return set()
 
 
 # ============================================================
-# SAVE PROCESSED APPLICATION EMAIL IDS
+# SAVE PROCESSED APPLICATION EMAIL IDS  (Supabase-backed)
 # ============================================================
 
-def save_processed_application_ids(
-    processed_ids
-):
-
-    with open(
-        PROCESSED_APPLICATION_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            sorted(processed_ids),
-            file,
-            indent=2
-        )
+def save_processed_application_ids(processed_ids):
+    """
+    No-op: individual saves are done in
+    mark_application_email_processed() via upsert.
+    Kept for backward compatibility.
+    """
+    pass
 
 
 # ============================================================
-# MARK APPLICATION EMAIL PROCESSED
+# MARK APPLICATION EMAIL PROCESSED  (Supabase-backed)
 # ============================================================
 
-def mark_application_email_processed(
-    message_id
-):
+def mark_application_email_processed(message_id):
+    """
+    Record a Gmail message ID as processed in Supabase
+    so it is never re-processed after a server restart.
+    """
+    if not message_id:
+        return
+    try:
+        _supabase.table("processed_gmail_messages").upsert(
+            {
+                "message_id": str(message_id),
+                "pipeline": "application",
+            },
+            on_conflict="message_id,pipeline"
+        ).execute()
+    except Exception as err:
+        print("[Gmail] Could not save processed ID to Supabase:", err)
 
-    processed_ids = (
-        load_processed_application_ids()
-    )
-
-    processed_ids.add(
-        message_id
-    )
-
-    save_processed_application_ids(
-        processed_ids
-    )
 
 
 # ============================================================

@@ -57,114 +57,79 @@ PROCESSED_MESSAGES_FILE = (
     / "processed_gmail_messages.json"
 )
 
+# Supabase import for persistent message ID tracking
+from supabase_db import supabase as _supabase
+
+
 
 def load_processed_message_ids():
     """
-    Load message IDs used by the existing
-    candidate-reply system.
+    Load reply-pipeline message IDs from Supabase.
     """
-
-    if not PROCESSED_MESSAGES_FILE.exists():
-
-        return set()
-
     try:
-
-        with open(
-            PROCESSED_MESSAGES_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(
-                file
-            )
-
-        if not isinstance(
-            data,
-            list
-        ):
-
-            return set()
-
+        response = (
+            _supabase
+            .table("processed_gmail_messages")
+            .select("message_id")
+            .eq("pipeline", "reply")
+            .execute()
+        )
         return {
-            str(item)
-            for item in data
-            if item
+            row["message_id"]
+            for row in (response.data or [])
         }
-
-    except Exception:
-
+    except Exception as err:
+        print("[Reply] Could not load processed IDs from Supabase:", err)
         return set()
 
 
-def save_processed_message_ids(
-    message_ids
-):
+def save_processed_message_ids(message_ids):
     """
-    Save processed Gmail message IDs.
+    No-op: saves done individually via upsert.
+    Kept for backward compatibility.
     """
-
-    with open(
-        PROCESSED_MESSAGES_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            sorted(
-                list(message_ids)
-            ),
-            file,
-            indent=2
-        )
+    pass
 
 
-def mark_message_as_processed(
-    message_id
-):
+def mark_message_as_processed(message_id):
     """
-    Backward-compatible function used by
-    the existing reply pipeline.
+    Record a reply message ID as processed in Supabase.
     """
-
     if not message_id:
-
         return
-
-    processed = (
-        load_processed_message_ids()
-    )
-
-    processed.add(
-        str(message_id)
-    )
-
-    save_processed_message_ids(
-        processed
-    )
+    try:
+        _supabase.table("processed_gmail_messages").upsert(
+            {
+                "message_id": str(message_id),
+                "pipeline": "reply",
+            },
+            on_conflict="message_id,pipeline"
+        ).execute()
+    except Exception as err:
+        print("[Reply] Could not save processed ID to Supabase:", err)
 
 
-def is_message_processed(
-    message_id
-):
+def is_message_processed(message_id):
     """
-    Check whether a Gmail message has already
-    been processed by the existing reply system.
+    Check whether a reply message has already been processed.
     """
-
     if not message_id:
-
+        return False
+    try:
+        response = (
+            _supabase
+            .table("processed_gmail_messages")
+            .select("message_id")
+            .eq("message_id", str(message_id))
+            .eq("pipeline", "reply")
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data)
+    except Exception as err:
+        print("[Reply] Could not check processed ID in Supabase:", err)
         return False
 
-    processed = (
-        load_processed_message_ids()
-    )
-
-    return (
-        str(message_id)
-        in processed
-    )
 
 
 # ============================================================
