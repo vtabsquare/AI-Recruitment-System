@@ -582,6 +582,17 @@ def process_application(
         print()
 
         # ----------------------------------------------------
+        # MARK APPLICATION EMAIL AS PROCESSED
+        #
+        # Do this BEFORE processing to prevent duplicate
+        # runs if the 20-second poll interval triggers
+        # while Gemini is still analyzing this resume.
+        # ----------------------------------------------------
+
+        if message_id:
+            mark_application_email_processed(message_id)
+
+        # ----------------------------------------------------
         # Existing recruitment system
         #
         # Store the Gmail application email before entering
@@ -596,10 +607,14 @@ def process_application(
             candidate_email or ""
         ).strip().lower()
 
-        result = process_candidate(
-            resume_path,
-            job_role
-        )
+        try:
+            result = process_candidate(
+                resume_path,
+                job_role
+            )
+        except Exception as e:
+            print(f"Error processing candidate: {e}")
+            result = {"error": str(e)}
 
         # Clear the temporary application context immediately
         # after the candidate has been processed.
@@ -619,21 +634,18 @@ def process_application(
             result
         )
 
-    # --------------------------------------------------------
-    # MARK APPLICATION EMAIL AS PROCESSED
-    #
-    # Only after successful processing.
-    # --------------------------------------------------------
-
-    if message_id:
-
-        mark_application_email_processed(
-            message_id
+        results.append(
+            result
         )
 
         print()
         print(
-            "Application email marked as processed."
+            "AI recruitment pipeline completed."
+        )
+
+        print(
+            "Result:",
+            result
         )
 
     return results

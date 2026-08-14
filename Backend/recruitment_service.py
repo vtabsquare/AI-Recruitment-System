@@ -5,6 +5,7 @@ from supabase_db import (
     get_job_role,
     create_candidate,
     create_application,
+    get_existing_application,
     supabase
 )
 
@@ -404,12 +405,28 @@ def process_candidate(
     print(role)
 
     # ========================================================
-    # 5. CREATE APPLICATION
+    # 5. CREATE OR GET APPLICATION
     # ========================================================
 
     print(
-        "\n[5/8] Creating application..."
+        "\n[5/8] Checking existing applications..."
     )
+
+    existing_app = get_existing_application(
+        candidate["id"],
+        role["id"]
+    )
+
+    if existing_app:
+        print("Candidate already has an application for this role. Skipping evaluation.")
+        return {
+            "skipped": True,
+            "reason": "Duplicate application",
+            "candidate": candidate,
+            "application": existing_app
+        }
+
+    print("Creating new application...")
 
     application = create_application(
 

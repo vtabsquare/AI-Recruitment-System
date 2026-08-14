@@ -215,6 +215,24 @@ def create_application(
     return response.data[0]
 
 
+def get_existing_application(candidate_id, job_role_id):
+    """
+    Check if an application already exists for this candidate and role.
+    Returns the application if found, None otherwise.
+    """
+    response = (
+        supabase
+        .table("applications")
+        .select("*")
+        .eq("candidate_id", candidate_id)
+        .eq("job_role_id", job_role_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return response.data[0] if response.data else None
+
+
 def get_application(application_id):
     """
     Fetch an application by its database UUID.
