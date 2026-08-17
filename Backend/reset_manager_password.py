@@ -34,7 +34,7 @@ try:
     print("========================================")
     print("MANAGER PASSWORD UPDATED SUCCESSFULLY")
     print("========================================")
-    print("Email: vasanththiru786573@gmail.com")
+    print("Email: vitabsquare@gmail.com")
     print("User ID: " + USER_ID)
     print("Password was changed successfully.")
     print("========================================")

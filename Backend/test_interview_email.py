@@ -20,7 +20,7 @@ print("=" * 60)
 # ------------------------------------------------------------
 
 candidate_email = (
-    "vasanththiru786573@gmail.com"
+    "vitabsquare@gmail.com"
 )
 
 candidate_name = (

@@ -27,7 +27,7 @@ SCOPES = [
 # RECRUITMENT CONFIGURATION
 # ============================================================
 
-COMPANY_EMAIL = "vasanththiru786573@gmail.com"
+COMPANY_EMAIL = "vitabsquare@gmail.com"
 
 RESUME_EXTENSIONS = {
     ".pdf",

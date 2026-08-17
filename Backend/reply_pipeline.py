@@ -51,11 +51,11 @@ from interview_scheduler import (
 # Confirmation email
 # ============================================================
 
-COMPANY_EMAIL = "vasanththiru786573@gmail.com"
+COMPANY_EMAIL = "vitabsquare@gmail.com"
 
 # Temporary manager/interviewer email for the local demo.
 # Replace this with the real interviewer email for production.
-INTERVIEW_MANAGER_EMAIL = "vasanththiru786573@gmail.com"
+INTERVIEW_MANAGER_EMAIL = "vitabsquare@gmail.com"
 
 # VTAB SQUARE COMPANY INTERVIEW SLOTS
 # Every interview starts before 2:00 PM.
@@ -533,7 +533,7 @@ def save_interview(
     # FIND ACTIVE INTERVIEW MANAGER
     # --------------------------------------------------------
 
-    manager_email = "vasanththiru786573@gmail.com"
+    manager_email = "vitabsquare@gmail.com"
 
     manager_response = (
         supabase
