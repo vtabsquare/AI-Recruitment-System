@@ -761,6 +761,21 @@ def mark_application_email_processed(message_id):
         print("[Gmail] Could not save processed ID to Supabase:", err)
 
 
+def unmark_application_email_processed(message_id):
+    """
+    Remove a Gmail message ID from processed_gmail_messages in Supabase
+    if candidate processing encountered an error, allowing it to be retried.
+    """
+    if not message_id:
+        return
+    try:
+        _supabase.table("processed_gmail_messages").delete().eq(
+            "message_id", str(message_id)
+        ).eq("pipeline", "application").execute()
+    except Exception as err:
+        print("[Gmail] Could not unmark processed ID in Supabase:", err)
+
+
 
 # ============================================================
 # GET FULL GMAIL MESSAGE

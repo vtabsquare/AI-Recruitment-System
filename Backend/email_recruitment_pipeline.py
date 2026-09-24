@@ -235,7 +235,10 @@ def _extract_resume_email_fallback(text):
 
 
 def _analyze_resume_using_gemini_with_email_fallback(
-    resume_text
+    resume_text,
+    candidate_email=None,
+    *args,
+    **kwargs
 ):
     """
     Compatibility wrapper around the existing Gemini analyzer.
@@ -253,26 +256,33 @@ def _analyze_resume_using_gemini_with_email_fallback(
     if not resume_text:
         raise ValueError("Resume text is empty.")
 
+    target_email = str(
+        candidate_email or _CURRENT_CANDIDATE_EMAIL or ""
+    ).strip().lower()
+
     resume_email = _extract_resume_email_fallback(
         resume_text
-    )
+    ) or target_email
 
     # --------------------------------------------------------
     # NORMAL PATH
     #
     # Preserve the existing analyzer completely when the
-    # resume already contains an email.
+    # resume already contains an email or an email was provided.
     # --------------------------------------------------------
 
     if resume_email:
         result = _ORIGINAL_ANALYZE_RESUME(
-            resume_text
+            resume_text,
+            candidate_email=target_email or None,
+            *args,
+            **kwargs
         )
 
         # If the application was received via Gmail, the sender's email address
         # is the authoritative address where the candidate expects notifications and replies.
-        if _CURRENT_CANDIDATE_EMAIL:
-            result["email"] = str(_CURRENT_CANDIDATE_EMAIL).strip().lower()
+        if target_email:
+            result["email"] = target_email
 
         return result
 
@@ -284,9 +294,7 @@ def _analyze_resume_using_gemini_with_email_fallback(
     # the authoritative candidate email.
     # --------------------------------------------------------
 
-    candidate_email = str(
-        _CURRENT_CANDIDATE_EMAIL or ""
-    ).strip().lower()
+    candidate_email = target_email
 
     if not candidate_email:
         raise ValueError(
@@ -448,6 +456,11 @@ read_new_candidate_applications = (
 
 mark_application_email_processed = (
     gmail_reader.mark_application_email_processed
+)
+
+
+unmark_application_email_processed = (
+    gmail_reader.unmark_application_email_processed
 )
 
 
@@ -625,6 +638,12 @@ def process_application(
         # Clear the temporary application context immediately
         # after the candidate has been processed.
         _CURRENT_CANDIDATE_EMAIL = ""
+
+        if message_id and result.get("error"):
+            try:
+                unmark_application_email_processed(message_id)
+            except Exception:
+                pass
 
         results.append(
             result
