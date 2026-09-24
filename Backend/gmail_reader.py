@@ -27,7 +27,10 @@ SCOPES = [
 # RECRUITMENT CONFIGURATION
 # ============================================================
 
-COMPANY_EMAIL = "vitabsquare@gmail.com"
+try:
+    from config import COMPANY_EMAIL
+except Exception:
+    COMPANY_EMAIL = os.getenv("COMPANY_EMAIL", "vitabsquare@gmail.com")
 
 RESUME_EXTENSIONS = {
     ".pdf",
@@ -92,6 +95,8 @@ IGNORED_SENDER_DOMAINS = {
 # CREATE GMAIL SERVICE
 # ============================================================
 
+_last_failed_token = None
+
 def get_gmail_service():
     """
     Create and return the authenticated Gmail API service.
@@ -99,11 +104,16 @@ def get_gmail_service():
     or from token.json file (local development).
     Returns None gracefully if credentials are unavailable.
     """
+    global _last_failed_token
+
+    token_env = os.getenv("GOOGLE_TOKEN_JSON")
+    current_token_ref = token_env or ("token.json" if os.path.exists("token.json") else "")
+    if current_token_ref and current_token_ref == _last_failed_token:
+        return None
 
     creds = None
 
     # --- Production: load from environment variable ---
-    token_env = os.getenv("GOOGLE_TOKEN_JSON")
     if token_env:
         try:
             token_data = base64.b64decode(token_env).decode("utf-8")
@@ -113,6 +123,7 @@ def get_gmail_service():
             )
         except Exception as error:
             print("[Gmail] Could not load token from GOOGLE_TOKEN_JSON:", error)
+            _last_failed_token = current_token_ref
             return None
 
     # --- Local dev: load from file ---
@@ -120,7 +131,6 @@ def get_gmail_service():
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
 
     else:
-        print("[Gmail] No credentials available (no GOOGLE_TOKEN_JSON env var and no token.json). Gmail features disabled.")
         return None
 
     # Refresh token if expired
@@ -132,14 +142,16 @@ def get_gmail_service():
                 if not token_env and os.path.exists("token.json"):
                     with open("token.json", "w", encoding="utf-8") as token:
                         token.write(creds.to_json())
-            except Exception as error:
-                print("[Gmail] Token refresh failed:", error)
+                _last_failed_token = None
+            except Exception:
+                _last_failed_token = current_token_ref
                 return None
         else:
             # Cannot open browser on server — fail gracefully
-            print("[Gmail] Token invalid and cannot be refreshed. Gmail features disabled.")
+            _last_failed_token = current_token_ref
             return None
 
+    _last_failed_token = None
     return build("gmail", "v1", credentials=creds)
 
 
@@ -781,6 +793,9 @@ def read_new_candidate_applications(
 ):
 
     service = get_gmail_service()
+    if not service:
+        print("[Gmail] Service unavailable (Google credentials invalid or expired). Skipping inbox check.")
+        return []
 
     processed_ids = (
         load_processed_application_ids()
@@ -1147,6 +1162,8 @@ def read_new_candidate_applications(
 def test_gmail_connection():
 
     service = get_gmail_service()
+    if not service:
+        return ""
 
     profile = (
         service

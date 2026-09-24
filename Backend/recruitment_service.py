@@ -1,3 +1,13 @@
+import sys
+
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from resume_reader import extract_resume_text
 from ai_analyzer import analyze_resume
 
@@ -260,7 +270,9 @@ def send_recruitment_email(
 
 def process_candidate(
     resume_file_path,
-    role_name
+    role_name,
+    candidate_email=None,
+    candidate_name=None
 ):
     """
     Run the complete AI recruitment screening pipeline.
@@ -319,25 +331,28 @@ def process_candidate(
     )
 
     analysis = analyze_resume(
-        resume_text
+        resume_text,
+        candidate_email=candidate_email
     )
 
     print(
         "Gemini analysis completed."
     )
 
-    candidate_name = str(
+    extracted_name = str(
         analysis.get(
             "candidate_name",
             ""
         )
     ).strip()
 
+    if not candidate_name or candidate_name.lower() in ("", "candidate"):
+        candidate_name = extracted_name or candidate_name or "Candidate"
+    elif extracted_name and extracted_name.lower() != "candidate":
+        candidate_name = extracted_name
+
     candidate_email = str(
-        analysis.get(
-            "email",
-            ""
-        )
+        candidate_email or analysis.get("email", "")
     ).strip().lower()
 
     phone_number = str(

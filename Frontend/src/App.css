@@ -14,4 +14,15 @@
 @media(max-width:700px){.site-header{padding:0 17px}.system-pill{display:none}.hero-copy h1{letter-spacing:-2.5px}.home-footer{gap:10px;flex-direction:column}.portal-sidebar{position:static;width:100%;height:auto;min-height:auto}.portal-page{display:block}.portal-main{width:100%;margin-left:0}.portal-header{padding:22px 18px}.portal-content{padding:24px 18px}.portal-nav{display:none}.portal-side-bottom{display:none}.candidate-card{grid-template-columns:1fr}.candidate-card>.candidate-status-chip,.candidate-actions{grid-column:auto;grid-row:auto}.candidate-actions{flex-wrap:wrap}.rating-grid{grid-template-columns:1fr}.table-row{grid-template-columns:1fr}.candidate-ai-page{padding:22px 17px}.chat-panel{min-height:560px}.hero-copy p{font-size:12px}.login-card{padding:28px}}
 
 .login-error{border:1px solid rgba(255,110,131,.2);background:rgba(255,110,131,.05);color:#ff8b9b;border-radius:10px;padding:10px 12px;font-size:11px;line-height:1.5}
+.login-success{border:1px solid rgba(80,227,170,.2);background:rgba(80,227,170,.05);color:#65dbaa;border-radius:10px;padding:10px 12px;font-size:11px;line-height:1.5}
+.login-link{border:0;background:transparent;color:#8c7bff;font:9px 'DM Mono',monospace;letter-spacing:1px;text-align:right;padding:4px 0;cursor:pointer}
+.login-link:hover{text-decoration:underline}
+.login-card-links{display:flex;justify-content:flex-end;margin-top:-6px}
 .primary-button:disabled{opacity:.55;cursor:not-allowed}
+
+/* ── Accessibility additions (Task 10) ─────────────────────────── */
+/* Visible focus ring for keyboard navigation (WCAG 2.4.7 / 2.4.11) */
+:focus-visible{outline:2px solid #8c7bff;outline-offset:2px;border-radius:4px}
+/* Skip-to-main-content link — hidden until focused by keyboard */
+.skip-link{position:absolute;top:-44px;left:0;background:#8c7bff;color:#fff;padding:9px 14px;font:11px 'DM Mono',monospace;letter-spacing:1px;text-decoration:none;z-index:10000;border-radius:0 0 8px 0;transition:top .15s}
+.skip-link:focus{top:0}

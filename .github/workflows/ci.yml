@@ -1,0 +1,252 @@
+# VTAB Square — CI Pipeline
+# Validates every push and pull request before it reaches production.
+#
+# What this workflow does:
+#   1. Validates Python syntax and runs all 9 backend regression suites (344 tests).
+#   2. Installs frontend dependencies and runs the production build.
+#   3. Checks that no secrets or credential files were accidentally committed.
+#
+# What this workflow does NOT do:
+#   - Deploy to production  (Render handles deployment separately via render.yaml)
+#   - Connect to the real Supabase database or any external service
+#   - Run as the production server
+#   - Modify render.yaml or any production configuration
+#
+# Environment variables in CI use dummy/test values only.
+# The existing test suites are designed to work with dummy env vars.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "release/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Backend — syntax, import, and regression tests
+  # ─────────────────────────────────────────────────────────────────────────
+  backend-validation:
+    name: "Backend — Syntax + Regression Tests"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: Backend
+
+    env:
+      # Dummy values — tests are designed to work without real credentials.
+      # These NEVER connect to production Supabase or any external service.
+      SUPABASE_URL: "https://ci-test-placeholder.supabase.co"
+      SUPABASE_KEY: "ci-test-placeholder-key"
+      SUPABASE_SERVICE_ROLE_KEY: "ci-test-placeholder-service-role-key"
+      SUPABASE_ANON_KEY: "ci-test-placeholder-anon-key"
+      GEMINI_API_KEY: "ci-test-placeholder-gemini-key"
+      BREVO_API_KEY: "ci-test-placeholder-brevo-key"
+      BREVO_SENDER_EMAIL: "ci-test@example.com"
+      ALLOWED_ORIGINS: "http://localhost:5173"
+      FRONTEND_URL: "http://localhost:5173"
+      ENVIRONMENT: "ci"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "Backend/requirements.txt"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── Syntax check ──────────────────────────────────────────────────────
+      - name: Syntax check — Backend/app.py
+        working-directory: ${{ github.workspace }}
+        run: python -m py_compile Backend/app.py
+
+      # ── Regression tests ──────────────────────────────────────────────────
+      # Each suite is run independently so the log clearly shows which suite failed.
+      # Tests use dummy env vars above; they do not connect to production resources.
+
+      - name: "Task 1 — API Retries (13 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task1_retries.py
+
+      - name: "Task 2 — Password Reset (13 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task2_password_reset.py
+
+      - name: "Task 3 — Session Security / Logout (7 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task3_logout.py
+
+      - name: "Task 4 — Secrets Hygiene & Config (8 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task4_config.py
+
+      - name: "Task 5 — Audit Trail (59 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task5_audit.py
+
+      - name: "Task 6 — Error Handling / Sanitisation (143 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task6_error_handling.py
+
+      - name: "Task 7 — Backup & Recovery (56 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task7_backup_recovery.py
+
+      - name: "Task 9 — Monitoring & Support (16 tests)"
+        working-directory: ${{ github.workspace }}
+        run: python scratch/test_task9_monitoring.py
+
+      - name: "Task 10 — Accessibility / WCAG 2.2 AA (29 tests)"
+        working-directory: ${{ github.workspace }}
+        # The accessibility suite also runs `npm run build` internally.
+        # The frontend job above installs Node, but if this job needs npm:
+        run: python scratch/test_task10_accessibility.py
+
+      - name: "Summary — all regression suites completed"
+        run: echo "All backend regression suites passed (344 tests expected)."
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Frontend — install, lint (non-blocking), production build
+  # ─────────────────────────────────────────────────────────────────────────
+  frontend-validation:
+    name: "Frontend — Install + Build"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: Frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "Frontend/package-lock.json"
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Lint (advisory — non-blocking)
+        # Lint failures are reported but do not fail the CI job.
+        # This preserves the existing lint configuration without making
+        # pre-existing ESLint warnings break CI unexpectedly.
+        run: npm run lint || true
+
+      - name: UI/UX Tests (Vitest + React Testing Library)
+        run: npm test
+
+      - name: Production build
+        # This is the definitive check — the build MUST succeed.
+        run: npm run build
+
+      - name: Verify build output exists
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist/ directory was not created by the build."
+            exit 1
+          fi
+          echo "Build output verified: dist/ exists."
+          ls -lh dist/
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Security checks — verify no secrets committed
+  # ─────────────────────────────────────────────────────────────────────────
+  security-checks:
+    name: "Security — No Secrets Committed"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check — .env not committed
+        run: |
+          if find . -name ".env" -not -path "./.git/*" -not -name ".env.example" | grep -q .; then
+            echo "ERROR: .env file found in repository. Remove it immediately."
+            find . -name ".env" -not -path "./.git/*" -not -name ".env.example"
+            exit 1
+          fi
+          echo "OK: No .env files committed."
+
+      - name: Check — credentials.json not committed
+        run: |
+          if find . -name "credentials.json" -not -path "./.git/*" | grep -q .; then
+            echo "ERROR: credentials.json found in repository."
+            find . -name "credentials.json" -not -path "./.git/*"
+            exit 1
+          fi
+          echo "OK: No credentials.json committed."
+
+      - name: Check — token.json not committed
+        run: |
+          if find . -name "token.json" -not -path "./.git/*" | grep -q .; then
+            echo "ERROR: token.json found in repository."
+            find . -name "token.json" -not -path "./.git/*"
+            exit 1
+          fi
+          echo "OK: No token.json committed."
+
+      - name: Check — private key files not committed
+        run: |
+          if find . \( -name "*.pem" -o -name "*.key" -o -name "service_account.json" \) \
+               -not -path "./.git/*" | grep -q .; then
+            echo "ERROR: Private key or service account file found in repository."
+            find . \( -name "*.pem" -o -name "*.key" -o -name "service_account.json" \) \
+               -not -path "./.git/*"
+            exit 1
+          fi
+          echo "OK: No private key files committed."
+
+      - name: Check — documentation files present (Task 11 verification)
+        run: |
+          missing=0
+          for f in "README.md" "docs/DEVELOPER_GUIDE.md" \
+                   "docs/BACKUP_AND_RECOVERY.md" "docs/MONITORING_AND_SUPPORT.md"; do
+            if [ ! -f "$f" ]; then
+              echo "WARNING: Expected documentation file missing: $f"
+              missing=$((missing + 1))
+            else
+              echo "OK: $f present."
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            echo "ERROR: $missing required documentation file(s) are missing."
+            exit 1
+          fi
+
+      - name: Check — render.yaml present and unmodified structure
+        run: |
+          if [ ! -f "render.yaml" ]; then
+            echo "ERROR: render.yaml is missing. Production deployment blueprint removed."
+            exit 1
+          fi
+          # Verify the two required service names still exist
+          if ! grep -q "ai-recruitment-backend" render.yaml; then
+            echo "ERROR: Backend service name missing from render.yaml."
+            exit 1
+          fi
+          if ! grep -q "ai-recruitment-frontend" render.yaml; then
+            echo "ERROR: Frontend service name missing from render.yaml."
+            exit 1
+          fi
+          echo "OK: render.yaml present with expected service definitions."
+
+      - name: "Summary — security checks completed"
+        run: echo "All security checks passed."

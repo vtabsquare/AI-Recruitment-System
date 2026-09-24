@@ -2,6 +2,33 @@ from google import genai
 from google.genai import types
 from config import GEMINI_API_KEY
 import json
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+
+
+# ============================================================
+# GEMINI API RETRY HANDLING
+# ============================================================
+
+def _is_transient_ai_error(exc):
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 500, 502, 503, 504):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    exc_msg = str(exc).lower()
+    if "429" in exc_msg or "resource_exhausted" in exc_msg or "rate" in exc_msg or "503" in exc_msg or "unavailable" in exc_msg:
+        return True
+    return False
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception(_is_transient_ai_error),
+    reraise=True
+)
+def _generate_content_with_retry(gemini_client, **kwargs):
+    return gemini_client.models.generate_content(**kwargs)
 
 
 # ============================================================
@@ -98,7 +125,7 @@ def clean_email(value):
 # RESUME ANALYSIS
 # ============================================================
 
-def analyze_resume(resume_text):
+def analyze_resume(resume_text, candidate_email=None):
     """
     Analyze resume with Gemini.
 
@@ -114,6 +141,8 @@ def analyze_resume(resume_text):
     # --------------------------------------------------------
 
     resume_email = extract_plain_email(resume_text)
+    if not resume_email and candidate_email:
+        resume_email = str(candidate_email).strip().lower()
 
     if not resume_email:
         raise ValueError(
@@ -181,7 +210,8 @@ Resume:
     # Gemini request
     # --------------------------------------------------------
 
-    response = client.models.generate_content(
+    response = _generate_content_with_retry(
+        client,
         model="gemini-3.5-flash-lite",
         contents=prompt
     )
@@ -401,7 +431,8 @@ Return exactly this JSON structure:
     print("Required:", required_document)
     print("=" * 60)
 
-    response = client.models.generate_content(
+    response = _generate_content_with_retry(
+        client,
         model="gemini-3.5-flash-lite",
         contents=[
             document_part,

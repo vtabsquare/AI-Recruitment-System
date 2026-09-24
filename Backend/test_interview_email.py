@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 
 from interview_email_service import (
@@ -19,7 +20,8 @@ print("=" * 60)
 # Test candidate
 # ------------------------------------------------------------
 
-candidate_email = (
+candidate_email = os.getenv(
+    "TEST_CANDIDATE_EMAIL",
     "vitabsquare@gmail.com"
 )
 

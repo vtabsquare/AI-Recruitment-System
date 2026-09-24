@@ -56,7 +56,26 @@ function App() {
     return new URLSearchParams(window.location.search).get("token") || "";
   }, []);
 
-  const [screen, setScreen] = useState("home");
+  const recoveryToken = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    const hashParams = new URLSearchParams(hash);
+    const searchParams = new URLSearchParams(window.location.search);
+    const type = hashParams.get("type") || searchParams.get("type") || "";
+    const token =
+      hashParams.get("access_token") ||
+      searchParams.get("token") ||
+      hashParams.get("token") ||
+      searchParams.get("access_token") ||
+      "";
+    if (type === "recovery" || hash.includes("type=recovery") || window.location.pathname === "/reset-password") {
+      return token || "active";
+    }
+    return token && hash.includes("reset-password") ? token : "";
+  }, []);
+
+  const [screen, setScreen] = useState(() => (recoveryToken ? "reset-password" : "home"));
+  const [resetToken, setResetToken] = useState(recoveryToken);
   const [menuOpen, setMenuOpen] = useState(false);
   const [portal, setPortal] = useState(null);
   const [session, setSession] = useState(() => {
@@ -89,14 +108,23 @@ function App() {
     go(userRole === "manager" ? "manager" : "hr");
   };
 
-  const handleLogout = () => {
-    setSession(null);
+  const handleLogout = async () => {
+    const currentToken = session?.access_token;
     try {
-      sessionStorage.removeItem("vtab_session");
-    } catch {
-      // Ignore storage cleanup failures.
+      if (currentToken) {
+        await apiRequest("/api/auth/logout", { method: "POST" }, currentToken);
+      }
+    } catch (err) {
+      console.warn("Server logout notification failed:", err);
+    } finally {
+      setSession(null);
+      try {
+        sessionStorage.removeItem("vtab_session");
+      } catch {
+        // Ignore storage cleanup failures.
+      }
+      go("home");
     }
-    go("home");
   };
 
   const handleAuthError = (error) => {
@@ -118,6 +146,8 @@ function App() {
           className="menu-trigger"
           onClick={() => setMenuOpen(true)}
           aria-label="Open menu"
+          aria-expanded={menuOpen}
+          aria-controls="site-navigation"
         >
           <span />
           <span />
@@ -148,6 +178,29 @@ function App() {
           portal={portal}
           onBack={() => go("home")}
           onLogin={handleLogin}
+          onForgotPassword={() => go("forgot-password")}
+        />
+      )}
+
+      {screen === "forgot-password" && (
+        <ForgotPassword
+          portal={portal}
+          onBack={() => go(portal ? "login" : "home")}
+          onLoginClick={() => go("login")}
+        />
+      )}
+
+      {screen === "reset-password" && (
+        <ResetPassword
+          token={resetToken}
+          onBack={() => go("home")}
+          onSuccess={() => {
+            if (typeof window !== "undefined" && window.history && window.history.replaceState) {
+              window.history.replaceState(null, "", window.location.pathname);
+            }
+            setResetToken("");
+            go("login");
+          }}
         />
       )}
 
@@ -193,7 +246,7 @@ function Background() {
 
 function Home({ onAsk }) {
   return (
-    <main className="home-page">
+    <main className="home-page" id="main-content">
       <section className="hero-copy">
         <div className="eyebrow">
           <span className="eyebrow-dot" /> AUTONOMOUS RECRUITMENT INTELLIGENCE
@@ -246,6 +299,10 @@ function Menu({ onClose, onHome, onManager, onHR }) {
     <div className="menu-overlay" onClick={onClose}>
       <aside
         className="side-drawer"
+        id="site-navigation"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="drawer-head">
@@ -256,7 +313,7 @@ function Menu({ onClose, onHome, onManager, onHR }) {
               <small>AI RECRUITMENT OS</small>
             </div>
           </div>
-          <button className="close-button" onClick={onClose}>
+          <button className="close-button" onClick={onClose} aria-label="Close navigation menu">
             ×
           </button>
         </div>
@@ -294,7 +351,7 @@ function Menu({ onClose, onHome, onManager, onHR }) {
   );
 }
 
-function Login({ portal, onBack, onLogin }) {
+function Login({ portal, onBack, onLogin, onForgotPassword }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -348,7 +405,7 @@ function Login({ portal, onBack, onLogin }) {
   };
 
   return (
-    <main className="center-page">
+    <main className="center-page" id="main-content">
       <button className="back-link" onClick={onBack}>
         ← Back to AI OS
       </button>
@@ -381,6 +438,16 @@ function Login({ portal, onBack, onLogin }) {
             />
           </label>
 
+          <div className="login-card-links">
+            <button
+              type="button"
+              className="login-link"
+              onClick={onForgotPassword}
+            >
+              Forgot password?
+            </button>
+          </div>
+
           {error && (
             <div className="login-error" role="alert">
               {error}
@@ -395,6 +462,238 @@ function Login({ portal, onBack, onLogin }) {
 
         <div className="login-security">
           <i /> Authenticated enterprise access
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function ForgotPassword({ portal, onBack, onLoginClick }) {
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  const title = portal === "manager" ? "Manager Portal" : portal === "hr" ? "HR Operations" : "Staff Access";
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setError("Please enter your registered staff email address.");
+      return;
+    }
+    const emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+    if (!emailRegex.test(cleanEmail)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      await apiRequest("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email: cleanEmail }),
+      });
+      setSubmitted(true);
+    } catch (err) {
+      setError(err.message || "Failed to process password reset request.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="center-page" id="main-content">
+      <button className="back-link" onClick={onBack}>
+        ← Back to Login
+      </button>
+
+      <div className="login-card">
+        <div className="login-mark">V</div>
+        <div className="eyebrow">VTAB SQUARE / PASSWORD RECOVERY</div>
+        <h1>Reset Password</h1>
+        <p>{title} — Staff Account Recovery</p>
+
+        {submitted ? (
+          <div>
+            <div className="login-success" role="status">
+              If this email is associated with an active staff account, password reset instructions have been sent. Please check your inbox and spam folder.
+            </div>
+            <button
+              className="primary-button"
+              style={{ marginTop: "20px", width: "100%" }}
+              type="button"
+              onClick={onLoginClick}
+            >
+              RETURN TO LOGIN <span>→</span>
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <label>
+              REGISTERED STAFF EMAIL
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="Enter your company email"
+                autoComplete="email"
+              />
+            </label>
+
+            {error && (
+              <div className="login-error" role="alert">
+                {error}
+              </div>
+            )}
+
+            <button className="primary-button" type="submit" disabled={loading}>
+              {loading ? "SENDING INSTRUCTIONS..." : "SEND RESET INSTRUCTIONS"}
+              <span>→</span>
+            </button>
+
+            <div className="login-card-links" style={{ justifyContent: "center", marginTop: "12px" }}>
+              <button
+                type="button"
+                className="login-link"
+                onClick={onLoginClick}
+              >
+                Remember your password? Back to Login
+              </button>
+            </div>
+          </form>
+        )}
+
+        <div className="login-security">
+          <i /> Authenticated enterprise recovery
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function ResetPassword({ token, onBack, onSuccess }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [completed, setCompleted] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+
+    if (!password || !confirmPassword) {
+      setError("Please fill in both password fields.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters long.");
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError("Passwords do not match. Please ensure both fields are identical.");
+      return;
+    }
+
+    if (!token) {
+      setError("Password reset token is missing or expired. Please request a new link.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const result = await apiRequest("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({
+          token,
+          password,
+        }),
+      });
+
+      if (!result?.success) {
+        throw new Error(result?.message || "Failed to update password.");
+      }
+
+      setCompleted(true);
+    } catch (err) {
+      setError(err.message || "Failed to reset password. The link may have expired.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="center-page" id="main-content">
+      <button className="back-link" onClick={onBack}>
+        ← Back to Home
+      </button>
+
+      <div className="login-card">
+        <div className="login-mark">V</div>
+        <div className="eyebrow">VTAB SQUARE / SET NEW PASSWORD</div>
+        <h1>New Password</h1>
+        <p>Enter your new password to regain access to your staff account.</p>
+
+        {completed ? (
+          <div>
+            <div className="login-success" role="status">
+              Your password has been reset successfully! You can now log in using your new credentials.
+            </div>
+            <button
+              className="primary-button"
+              style={{ marginTop: "20px", width: "100%" }}
+              type="button"
+              onClick={onSuccess}
+            >
+              PROCEED TO LOGIN <span>→</span>
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <label>
+              NEW PASSWORD
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="At least 6 characters"
+                autoComplete="new-password"
+              />
+            </label>
+
+            <label>
+              CONFIRM NEW PASSWORD
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Re-enter your new password"
+                autoComplete="new-password"
+              />
+            </label>
+
+            {error && (
+              <div className="login-error" role="alert">
+                {error}
+              </div>
+            )}
+
+            <button className="primary-button" type="submit" disabled={loading}>
+              {loading ? "UPDATING PASSWORD..." : "UPDATE PASSWORD"}
+              <span>→</span>
+            </button>
+          </form>
+        )}
+
+        <div className="login-security">
+          <i /> End-to-end encrypted credential update
         </div>
       </div>
     </main>
@@ -462,7 +761,7 @@ function CandidateAI({ onBack }) {
   };
 
   return (
-    <main className="candidate-ai-page">
+    <main className="candidate-ai-page" id="main-content" aria-label="Candidate AI assistant">
       <div className="ai-topline">
         <button className="back-link" onClick={onBack}>
           ← AI OS
@@ -473,22 +772,28 @@ function CandidateAI({ onBack }) {
       </div>
 
       <div className="candidate-ai-layout">
-        <div className="mini-ball">
+        <div className="mini-ball" aria-hidden="true">
           <span>V</span>
         </div>
 
-        <section className="chat-panel">
+        <section className="chat-panel" aria-label="Chat with VTAB AI">
           <div className="chat-heading">
             <div>
               <div className="eyebrow">VTAB AI AGENT</div>
               <h1>How can I help?</h1>
             </div>
-            <div className="chat-status">
+            <div className="chat-status" aria-live="polite" aria-atomic="true">
               <i /> {loading ? "Thinking..." : "Online"}
             </div>
           </div>
 
-          <div className="chat-messages">
+          <div
+            className="chat-messages"
+            aria-live="polite"
+            aria-label="Chat messages"
+            role="log"
+            aria-relevant="additions"
+          >
             {messages.map((message, index) => (
               <div
                 className={`message ${message.role}`}
@@ -502,19 +807,20 @@ function CandidateAI({ onBack }) {
             ))}
 
             {loading && (
-              <div className="message ai">
+              <div className="message ai" aria-live="polite">
                 <span className="message-tag">VTAB AI</span>
                 <p>Thinking...</p>
               </div>
             )}
           </div>
 
-          <div className="suggestions">
+          <div className="suggestions" role="group" aria-label="Suggested questions">
             {suggested.map((suggestion) => (
               <button
                 key={suggestion}
                 onClick={() => answer(suggestion)}
                 disabled={loading}
+                aria-label={`Ask: ${suggestion}`}
               >
                 {suggestion}
               </button>
@@ -527,14 +833,16 @@ function CandidateAI({ onBack }) {
               event.preventDefault();
               answer(question);
             }}
+            aria-label="Ask a question"
           >
             <input
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               placeholder="Ask a candidate-related question..."
               disabled={loading}
+              aria-label="Type your question"
             />
-            <button type="submit" disabled={loading || !question.trim()}>
+            <button type="submit" disabled={loading || !question.trim()} aria-label="Send message">
               ↑
             </button>
           </form>
@@ -1492,9 +1800,9 @@ function PortalLayout({
   const items = role === "manager" ? managerItems : hrItems;
 
   return (
-    <main className="portal-page">
-      <aside className="portal-sidebar">
-        <button className="portal-brand" onClick={onHome}>
+    <main className="portal-page" id="main-content">
+      <aside className="portal-sidebar" aria-label="Portal navigation">
+        <button className="portal-brand" onClick={onHome} aria-label="Go to home page">
           <span className="brand-v">V</span>
           <div>
             <b>VTAB SQUARE</b>
@@ -1504,38 +1812,41 @@ function PortalLayout({
           </div>
         </button>
 
-        <div className="portal-nav-label">
+        <div className="portal-nav-label" aria-hidden="true">
           {role === "manager" ? "DECISION CENTER" : "HR OPERATIONS"}
         </div>
 
-        {items.map((item) => (
-          <button
-            key={item}
-            className={`portal-nav ${active === item ? "active" : ""}`}
-            onClick={() => setActive(item)}
-          >
-            <span>
-              {item === "Analytics" || item === "AI Audit Logs"
-                ? "◌"
-                : item === "Interview Feedback"
-                ? "◎"
-                : item === "Offer Approvals"
-                ? "◇"
-                : "◈"}
-            </span>
-            {item}
-          </button>
-        ))}
+        <nav aria-label={role === "manager" ? "Manager portal navigation" : "HR portal navigation"}>
+          {items.map((item) => (
+            <button
+              key={item}
+              className={`portal-nav ${active === item ? "active" : ""}`}
+              onClick={() => setActive(item)}
+              aria-current={active === item ? "page" : undefined}
+            >
+              <span aria-hidden="true">
+                {item === "Analytics" || item === "AI Audit Logs"
+                  ? "◌"
+                  : item === "Interview Feedback"
+                  ? "◎"
+                  : item === "Offer Approvals"
+                  ? "◇"
+                  : "◈"}
+              </span>
+              {item}
+            </button>
+          ))}
+        </nav>
 
         <div className="portal-side-bottom">
-          <div className="online">
+          <div className="online" aria-live="polite">
             <i /> AI services online
           </div>
-          <button onClick={onHome}>Exit portal</button>
+          <button onClick={onHome} aria-label="Exit portal and return to home">Exit portal</button>
         </div>
       </aside>
 
-      <section className="portal-main">
+      <section className="portal-main" aria-label={`${active} content`}>
         <header className="portal-header">
           <div>
             <div className="eyebrow">
@@ -1545,7 +1856,7 @@ function PortalLayout({
           </div>
 
           <div className="profile-chip">
-            <span>{role === "manager" ? "M" : "H"}</span>
+            <span aria-hidden="true">{role === "manager" ? "M" : "H"}</span>
             <div>
               <b>
                 {role === "manager" ? "Interview Manager" : "HR Operations"}
@@ -1754,9 +2065,9 @@ function ManagerQueue({ token, onError }) {
       </div>
 
       {loading && (
-        <div className="candidate-card">
+        <div className="candidate-card" aria-busy="true" aria-label="Loading candidates">
           <div className="candidate-main">
-            <div className="candidate-avatar">...</div>
+            <div className="candidate-avatar" aria-hidden="true">...</div>
 
             <div>
               <h3>Loading live candidates...</h3>
@@ -1937,9 +2248,13 @@ function ManagerQueue({ token, onError }) {
         <div
           className="menu-overlay"
           onClick={() => setSelected(null)}
+          aria-label="Close candidate review"
         >
           <div
             className="login-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Candidate application review"
             style={{
               maxWidth: 650,
               margin: "auto",
@@ -3396,9 +3711,13 @@ function OfferApprovals({ token, onError }) {
         <div
           className="menu-overlay"
           onClick={() => setSelected(null)}
+          aria-label="Close HR offer review"
         >
           <div
             className="login-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="HR offer review"
             style={{ maxWidth: 680, margin: "auto" }}
             onClick={(event) => event.stopPropagation()}
           >
@@ -3926,7 +4245,7 @@ function AuditLogs({ token, onError }) {
                     "VTAB AI / Recruitment workflow"}
                 </small>
               </div>
-              <time>
+              <time dateTime={log?.created_at ? new Date(log.created_at).toISOString() : undefined}>
                 {log?.created_at
                   ? new Date(log.created_at).toLocaleDateString()
                   : "Recent"}

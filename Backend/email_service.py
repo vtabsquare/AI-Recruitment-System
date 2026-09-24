@@ -1,28 +1,19 @@
 import os
 import re
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
 
 # ============================================================
 # BREVO CONFIGURATION
 # ============================================================
 
-BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
-
-BREVO_API_KEY = os.getenv(
-    "BREVO_API_KEY",
-    ""
-).strip()
-
-BREVO_SENDER_EMAIL = os.getenv(
-    "BREVO_SENDER_EMAIL",
-    ""
-).strip()
-
-BREVO_SENDER_NAME = os.getenv(
-    "BREVO_SENDER_NAME",
-    "VTAB Square Recruitment"
-).strip()
+from config import (
+    BREVO_API_URL,
+    BREVO_API_KEY,
+    BREVO_SENDER_EMAIL,
+    BREVO_SENDER_NAME,
+)
 
 
 # ============================================================
@@ -72,6 +63,66 @@ def _validate_configuration():
             f"Invalid BREVO_SENDER_EMAIL: "
             f"{BREVO_SENDER_EMAIL}"
         )
+
+
+# ============================================================
+# BREVO RETRY HANDLING
+# ============================================================
+
+class BrevoTransientError(RuntimeError):
+    """Raised for transient/temporary Brevo HTTP failures (rate limit 429 or 5xx server errors)."""
+    pass
+
+
+def _is_transient_brevo_error(exc):
+    # ReadTimeout means request was transmitted; Brevo might have accepted and queued the email.
+    # We DO NOT retry on ReadTimeout to guarantee that duplicate emails are never delivered.
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return False
+    # ConnectTimeout means TCP handshake was never established. Brevo never saw the request. Safe to retry.
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    # ConnectionError means DNS or socket failed before transmission. Safe to retry.
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return True
+    # BrevoTransientError means Brevo explicitly responded with HTTP 429 or 5xx rejection. Safe to retry.
+    if isinstance(exc, BrevoTransientError):
+        return True
+    return False
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception(_is_transient_brevo_error),
+    reraise=True
+)
+def _post_brevo_email(headers, payload):
+    response = requests.post(
+        BREVO_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=30
+    )
+
+    if not response.ok:
+        try:
+            details = response.json()
+        except ValueError:
+            details = response.text
+
+        msg = f"Brevo email failed (HTTP {response.status_code}): {details}"
+        if response.status_code in (429, 500, 502, 503, 504):
+            raise BrevoTransientError(msg)
+        raise RuntimeError(msg)
+
+    try:
+        return response.json()
+    except ValueError:
+        return {
+            "status_code": response.status_code,
+            "response": response.text
+        }
 
 
 # ============================================================
@@ -153,47 +204,7 @@ def send_email(
             "application/json"
     }
 
-    response = requests.post(
-
-        BREVO_API_URL,
-
-        headers=headers,
-
-        json=payload,
-
-        timeout=30
-    )
-
-    if not response.ok:
-
-        try:
-
-            details = response.json()
-
-        except ValueError:
-
-            details = response.text
-
-        raise RuntimeError(
-            f"Brevo email failed "
-            f"(HTTP {response.status_code}): "
-            f"{details}"
-        )
-
-    try:
-
-        return response.json()
-
-    except ValueError:
-
-        return {
-
-            "status_code":
-                response.status_code,
-
-            "response":
-                response.text
-        }
+    return _post_brevo_email(headers, payload)
 
 
 # ============================================================

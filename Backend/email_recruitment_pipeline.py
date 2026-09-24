@@ -269,7 +269,11 @@ def _analyze_resume_using_gemini_with_email_fallback(
             resume_text
         )
 
-        # Keep the original analyzer's extracted email.
+        # If the application was received via Gmail, the sender's email address
+        # is the authoritative address where the candidate expects notifications and replies.
+        if _CURRENT_CANDIDATE_EMAIL:
+            result["email"] = str(_CURRENT_CANDIDATE_EMAIL).strip().lower()
+
         return result
 
     # --------------------------------------------------------
@@ -610,7 +614,9 @@ def process_application(
         try:
             result = process_candidate(
                 resume_path,
-                job_role
+                job_role,
+                candidate_email=candidate_email,
+                candidate_name=candidate_name
             )
         except Exception as e:
             print(f"Error processing candidate: {e}")

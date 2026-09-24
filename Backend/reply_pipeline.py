@@ -51,11 +51,15 @@ from interview_scheduler import (
 # Confirmation email
 # ============================================================
 
-COMPANY_EMAIL = "vitabsquare@gmail.com"
-
-# Temporary manager/interviewer email for the local demo.
-# Replace this with the real interviewer email for production.
-INTERVIEW_MANAGER_EMAIL = "vitabsquare@gmail.com"
+try:
+    from config import COMPANY_EMAIL, INTERVIEW_MANAGER_EMAIL
+except Exception:
+    COMPANY_EMAIL = os.getenv("COMPANY_EMAIL", "vitabsquare@gmail.com")
+    INTERVIEW_MANAGER_EMAIL = (
+        os.getenv("INTERVIEW_MANAGER_EMAIL")
+        or os.getenv("INTERVIEWER_EMAIL")
+        or COMPANY_EMAIL
+    )
 
 # VTAB SQUARE COMPANY INTERVIEW SLOTS
 # Every interview starts before 2:00 PM.
@@ -2127,7 +2131,15 @@ def process_candidate_replies():
     from googleapiclient.discovery import build
     from google_auth import get_google_credentials
 
-    credentials = get_google_credentials()
+    try:
+        credentials = get_google_credentials()
+    except Exception:
+        print("[Reply Pipeline] Google authentication unavailable. Skipping reply check.")
+        return []
+
+    if not credentials:
+        print("[Reply Pipeline] No Google credentials found. Skipping reply check.")
+        return []
 
     service = build(
         "gmail",

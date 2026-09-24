@@ -3,8 +3,62 @@ import uuid
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
 from google_auth import get_google_credentials
+
+
+# ============================================================
+# GOOGLE CALENDAR API RETRY HANDLING
+# ============================================================
+
+def _is_transient_google_read_error(exc):
+    """Safe retry predicate for idempotent read-only queries (e.g. freebusy.query)."""
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+        return status in (429, 500, 502, 503, 504)
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    return False
+
+
+def _is_transient_google_write_error(exc):
+    """
+    Retry predicate for mutating write operations (e.g. events.insert).
+    CRITICAL: Network timeouts (TimeoutError, ConnectionError) must NEVER be retried
+    because Google may have already created the event, and retrying would duplicate it.
+    Only explicit HTTP 429 (quota exceeded / rate limit) where Google confirmed rejection is safe.
+    """
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+        return status == 429
+    return False
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception(_is_transient_google_read_error),
+    reraise=True
+)
+def _execute_google_api_read(request_obj):
+    """Executes idempotent read queries with full transient retry."""
+    return request_obj.execute()
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception(_is_transient_google_write_error),
+    reraise=True
+)
+def _execute_google_api_insert(request_obj):
+    """Executes mutating insert with strict duplicate-event protection (no timeout retries)."""
+    return request_obj.execute()
+
+
+# Backwards compatibility alias for generic calls (defaults to read semantics)
+_execute_google_api_call = _execute_google_api_read
 
 
 # ============================================================
@@ -365,7 +419,7 @@ def is_slot_available(
 
     try:
 
-        response = (
+        response = _execute_google_api_read(
             service
             .freebusy()
             .query(
@@ -388,7 +442,6 @@ def is_slot_available(
                     ]
                 }
             )
-            .execute()
         )
 
         calendars = (
@@ -886,7 +939,7 @@ def create_google_calendar_event(
 
     try:
 
-        created_event = (
+        created_event = _execute_google_api_insert(
             service
             .events()
             .insert(
@@ -906,7 +959,6 @@ def create_google_calendar_event(
                     else "all"
                 )
             )
-            .execute()
         )
 
     except HttpError as error:
