@@ -2,7 +2,8 @@ import sys
 import os
 from pathlib import Path
 
-BACKEND_DIR = r"c:\Users\moham\OneDrive\Documents\AI-Recruitment-System-main\AI-Recruitment-System-main\Backend"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+BACKEND_DIR = str(ROOT_DIR / "Backend")
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 

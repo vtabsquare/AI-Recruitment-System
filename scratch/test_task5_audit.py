@@ -7,9 +7,10 @@ import sys
 import os
 from unittest.mock import MagicMock, patch
 
-backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "OneDrive", "Documents", "AI-Recruitment-System-main", "AI-Recruitment-System-main", "Backend"))
-if not os.path.exists(backend_dir):
-    backend_dir = r"c:\Users\moham\OneDrive\Documents\AI-Recruitment-System-main\AI-Recruitment-System-main\Backend"
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+backend_dir = str(ROOT_DIR / "Backend")
 
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
