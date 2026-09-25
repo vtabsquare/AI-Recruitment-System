@@ -38,6 +38,21 @@ try:
 except Exception:
     gemini_client = None
 
+
+def _call_gemini_with_fallback(client, **kwargs):
+    model = (kwargs.get("model") or os.getenv("GEMINI_MODEL") or "").strip()
+    if not model or model in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.0-pro"):
+        model = "gemini-3.5-flash"
+    kwargs["model"] = model
+    try:
+        return client.models.generate_content(**kwargs)
+    except Exception as exc:
+        err_str = str(exc).lower()
+        if "404" in err_str or "not_found" in err_str or "no longer available" in err_str:
+            kwargs["model"] = "gemini-3.5-flash-lite"
+            return client.models.generate_content(**kwargs)
+        raise
+
 app = FastAPI(
     title="VTAB Square AI Recruitment API",
     version="1.2.0",
@@ -2141,8 +2156,8 @@ Analyze the document carefully and return ONLY valid JSON:
 """
                 try:
                     from google.genai import types
-                    gem_res = gemini_client.models.generate_content(
-                        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+                    gem_res = _call_gemini_with_fallback(
+                        gemini_client,
                         contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), v_prompt]
                     )
                     ai_text = gem_res.text.strip() if gem_res and gem_res.text else ""
@@ -2464,11 +2479,8 @@ Allowed values for recommended_status:
         try:
             from google.genai import types
 
-            response = gemini_client.models.generate_content(
-                model=os.getenv(
-                    "GEMINI_MODEL",
-                    "gemini-3.5-flash",
-                ),
+            response = _call_gemini_with_fallback(
+                gemini_client,
                 contents=[
                     types.Part.from_bytes(
                         data=file_bytes,
@@ -2869,8 +2881,7 @@ Candidate question:
 {request.question.strip()}
 """
     try:
-        model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        response = gemini_client.models.generate_content(model=model, contents=prompt)
+        response = _call_gemini_with_fallback(gemini_client, contents=prompt)
         text = response.text.strip() if response and response.text else ""
         if not text:
             raise ValueError("Gemini returned an empty response.")
