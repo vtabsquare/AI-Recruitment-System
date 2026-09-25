@@ -260,6 +260,14 @@ function Home({ onAsk }) {
           VTAB AI coordinates recruitment from application to onboarding,
           while keeping human decisions exactly where they belong.
         </p>
+        <a
+          href="https://www.vtabsquare.com/?demo=1&product=ai-recruitment-system&source=ai-recruitment-demo"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 20, color: "inherit", fontWeight: 700, textDecoration: "underline", textUnderlineOffset: 5 }}
+        >
+          Contact for Demo <span aria-hidden="true">↗</span>
+        </a>
       </section>
 
       <button
