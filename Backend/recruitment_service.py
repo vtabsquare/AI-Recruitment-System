@@ -27,6 +27,7 @@ from resume_service import (
 from evaluation_service import evaluate_candidate
 
 from email_service import (
+    send_email,
     send_shortlisted_email,
     send_rejection_email
 )
@@ -432,11 +433,49 @@ def process_candidate(
         role["id"]
     )
 
-    if existing_app:
-        print("Candidate already has an application for this role. Skipping evaluation.")
+    ACTIVE_APPLICATION_STATUSES = {
+        "applied",
+        "processing",
+        "interview_pending",
+        "interview_scheduled",
+        "interview_completed",
+        "offer_pending",
+        "offer_accepted",
+        "onboarding",
+    }
+
+    if existing_app and existing_app.get("status") in ACTIVE_APPLICATION_STATUSES:
+        print(f"Candidate already has an active application ({existing_app.get('status')}) for this role. Sending status notification.")
+        try:
+            status_display = str(existing_app.get("status", "in progress")).replace("_", " ").title()
+            app_id = existing_app.get("application_id", "")
+            html_msg = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                <h2 style="color: #6357d7;">VTAB Square — Application Status Update</h2>
+                <p>Hello {candidate.get('candidate_name', 'Candidate')},</p>
+                <p>Thank you for reaching out to VTAB Square regarding the <strong>{role_name}</strong> position.</p>
+                <p>Our records show that you already have an active application in progress for this position:</p>
+                <ul>
+                    <li><strong>Application ID:</strong> {app_id}</li>
+                    <li><strong>Role:</strong> {role_name}</li>
+                    <li><strong>Current Status:</strong> {status_display}</li>
+                </ul>
+                <p>Our hiring team is actively processing your application. We will communicate the next steps with you directly via email.</p>
+                <p style="color: #888; font-size: 12px; margin-top: 30px;">VTAB Square Recruitment Team</p>
+            </div>
+            """
+            send_email(
+                recipient_email=candidate.get("email"),
+                recipient_name=candidate.get("candidate_name", "Candidate"),
+                subject=f"VTAB Square — Application Status ({role_name})",
+                html_content=html_msg
+            )
+        except Exception as email_err:
+            print(f"Could not send active application notice: {email_err}")
+
         return {
             "skipped": True,
-            "reason": "Duplicate application",
+            "reason": "Active application exists",
             "candidate": candidate,
             "application": existing_app
         }
