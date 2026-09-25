@@ -657,6 +657,37 @@ describe('AI Recruitment System - UI/UX Tests', () => {
 
       expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/intelligent hiring/i);
     });
+
+    it('displays warning alert and disabled inputs when visiting /reset-password without a token', () => {
+      window.history.replaceState(null, '', '/reset-password');
+      render(<App />);
+
+      expect(screen.getByRole('heading', { name: /new password/i })).toBeInTheDocument();
+      expect(screen.getByText(/no active password reset token was detected/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /request fresh reset link/i })).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/at least 6 characters/i)).toBeDisabled();
+      expect(screen.getByRole('button', { name: /update password/i })).toBeDisabled();
+    });
+
+    it('navigates to Forgot Password screen when "REQUEST FRESH RESET LINK" is clicked', async () => {
+      window.history.replaceState(null, '', '/reset-password');
+      const user = userEvent.setup();
+      render(<App />);
+
+      await user.click(screen.getByRole('button', { name: /request fresh reset link/i }));
+      expect(screen.getByRole('heading', { name: /reset password/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /send reset instructions/i })).toBeInTheDocument();
+    });
+
+    it('correctly extracts access token from double-hashed URL and enables form', () => {
+      window.history.replaceState(null, '', '/#type=recovery#access_token=token-from-double-hash');
+      render(<App />);
+
+      expect(screen.getByRole('heading', { name: /new password/i })).toBeInTheDocument();
+      expect(screen.queryByText(/no active password reset token was detected/i)).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/at least 6 characters/i)).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: /update password/i })).not.toBeDisabled();
+    });
   });
 
   // =========================================================================

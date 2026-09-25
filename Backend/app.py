@@ -397,6 +397,12 @@ def forgot_password(req: ForgotPasswordRequest, raw_request: Request):
                 parsed = urlparse(referer)
                 origin = f"{parsed.scheme}://{parsed.netloc}"
         if not origin:
+            try:
+                from config import FRONTEND_URL
+                origin = FRONTEND_URL
+            except Exception:
+                origin = ""
+        if not origin:
             origin = _allowed_origins[0] if _allowed_origins else "http://localhost:5173"
 
         redirect_url = f"{origin.rstrip('/')}/#type=recovery"
@@ -421,42 +427,47 @@ def forgot_password(req: ForgotPasswordRequest, raw_request: Request):
             new_data={"email": email},
         )
 
+        email_sent = False
         try:
-            supabase.auth.reset_password_for_email(
-                email,
-                options={"redirect_to": redirect_url}
+            link_res = supabase.auth.admin.generate_link({
+                "type": "recovery",
+                "email": email,
+                "options": {"redirect_to": redirect_url}
+            })
+            action_link = (
+                getattr(getattr(link_res, "properties", None), "action_link", None)
+                or getattr(link_res, "action_link", None)
             )
-        except Exception:
-            try:
-                link_res = supabase.auth.admin.generate_link({
-                    "type": "recovery",
-                    "email": email,
-                    "options": {"redirect_to": redirect_url}
-                })
-                action_link = (
-                    getattr(getattr(link_res, "properties", None), "action_link", None)
-                    or getattr(link_res, "action_link", None)
+            if action_link:
+                html_content = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <h2 style="color: #6357d7;">VTAB Square — Password Reset Request</h2>
+                    <p>Hello,</p>
+                    <p>We received a request to reset your password for the VTAB Square Recruitment Portal.</p>
+                    <p style="margin: 25px 0;">
+                        <a href="{action_link}" style="background-color: #7164dc; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Reset Password</a>
+                    </p>
+                    <p style="color: #666; font-size: 13px;">If the button above does not work, copy and paste this URL into your browser:</p>
+                    <p style="color: #888; font-size: 12px; word-break: break-all;">{action_link}</p>
+                    <p style="color: #888; font-size: 12px; margin-top: 30px;">If you did not request a password reset, you can safely ignore this email.</p>
+                </div>
+                """
+                send_email(
+                    recipient_email=email,
+                    recipient_name="Staff Member",
+                    subject="VTAB Square — Password Reset Instructions",
+                    html_content=html_content
                 )
-                if action_link:
-                    html_content = f"""
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-                        <h2 style="color: #6357d7;">VTAB Square — Password Reset Request</h2>
-                        <p>Hello,</p>
-                        <p>We received a request to reset your password for the VTAB Square Recruitment Portal.</p>
-                        <p style="margin: 25px 0;">
-                            <a href="{action_link}" style="background-color: #7164dc; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Reset Password</a>
-                        </p>
-                        <p style="color: #666; font-size: 13px;">If the button above does not work, copy and paste this URL into your browser:</p>
-                        <p style="color: #888; font-size: 12px; word-break: break-all;">{action_link}</p>
-                        <p style="color: #888; font-size: 12px; margin-top: 30px;">If you did not request a password reset, you can safely ignore this email.</p>
-                    </div>
-                    """
-                    send_email(
-                        recipient_email=email,
-                        recipient_name="Staff Member",
-                        subject="VTAB Square — Password Reset Instructions",
-                        html_content=html_content
-                    )
+                email_sent = True
+        except Exception:
+            pass
+
+        if not email_sent:
+            try:
+                supabase.auth.reset_password_for_email(
+                    email,
+                    options={"redirect_to": redirect_url}
+                )
             except Exception:
                 pass
 
@@ -470,7 +481,7 @@ def forgot_password(req: ForgotPasswordRequest, raw_request: Request):
 @app.post("/api/auth/reset-password")
 def reset_password(req: ResetPasswordRequest):
     token = (req.access_token or req.token or "").strip()
-    if not token:
+    if not token or token == "active":
         raise HTTPException(status_code=400, detail="Password reset token is required.")
 
     new_password = req.password

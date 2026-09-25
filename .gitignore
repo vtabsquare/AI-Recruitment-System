@@ -76,6 +76,7 @@ processed_*.json
 processed_*.txt
 recruitment_automation_state.json
 Backend/incoming_resumes/
+incoming_resumes/
 Backend/resume.pdf
 src_old/
 Frontend/src_old/

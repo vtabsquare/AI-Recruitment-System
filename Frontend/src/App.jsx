@@ -58,23 +58,44 @@ function App() {
 
   const recoveryToken = useMemo(() => {
     if (typeof window === "undefined") return "";
-    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    const hashParams = new URLSearchParams(hash);
+    // Normalize hash: split on all '#' and join with '&' so '#type=recovery#access_token=xyz' is parsed cleanly
+    const fullHash = (window.location.hash || "").replace(/^#+/, "");
+    const normalizedHash = fullHash.replace(/#/g, "&");
+    const hashParams = new URLSearchParams(normalizedHash);
     const searchParams = new URLSearchParams(window.location.search);
-    const type = hashParams.get("type") || searchParams.get("type") || "";
+
     const token =
       hashParams.get("access_token") ||
       searchParams.get("token") ||
       hashParams.get("token") ||
       searchParams.get("access_token") ||
       "";
-    if (type === "recovery" || hash.includes("type=recovery") || window.location.pathname === "/reset-password") {
-      return token || "active";
+
+    if (token && token !== "active") return token;
+
+    // Direct regex extraction fallback in case of non-standard query/hash encoding
+    const match = window.location.href.match(/[?&#](?:access_token|token)=([^&#]+)/);
+    if (match && match[1] && match[1] !== "active") {
+      return decodeURIComponent(match[1]);
     }
-    return token && hash.includes("reset-password") ? token : "";
+    return "";
   }, []);
 
-  const [screen, setScreen] = useState(() => (recoveryToken ? "reset-password" : "home"));
+  const isResetScreen = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const path = window.location.pathname || "";
+    const hash = window.location.hash || "";
+    const search = window.location.search || "";
+    return (
+      Boolean(recoveryToken) ||
+      path === "/reset-password" ||
+      hash.includes("type=recovery") ||
+      search.includes("type=recovery") ||
+      hash.includes("reset-password")
+    );
+  }, [recoveryToken]);
+
+  const [screen, setScreen] = useState(() => (isResetScreen ? "reset-password" : "home"));
   const [resetToken, setResetToken] = useState(recoveryToken);
   const [menuOpen, setMenuOpen] = useState(false);
   const [portal, setPortal] = useState(null);
@@ -194,6 +215,7 @@ function App() {
         <ResetPassword
           token={resetToken}
           onBack={() => go("home")}
+          onGoToForgot={() => go("forgot-password")}
           onSuccess={() => {
             if (typeof window !== "undefined" && window.history && window.history.replaceState) {
               window.history.replaceState(null, "", window.location.pathname);
@@ -583,15 +605,22 @@ function ForgotPassword({ portal, onBack, onLoginClick }) {
   );
 }
 
-function ResetPassword({ token, onBack, onSuccess }) {
+function ResetPassword({ token, onBack, onSuccess, onGoToForgot }) {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [completed, setCompleted] = useState(false);
 
+  const hasToken = Boolean(token && token !== "active");
+
   const submit = async (event) => {
     event.preventDefault();
+
+    if (!hasToken) {
+      setError("Password reset token is missing or invalid. Please click the reset link directly from your email, or request a fresh one.");
+      return;
+    }
 
     if (!password || !confirmPassword) {
       setError("Please fill in both password fields.");
@@ -605,11 +634,6 @@ function ResetPassword({ token, onBack, onSuccess }) {
 
     if (password !== confirmPassword) {
       setError("Passwords do not match. Please ensure both fields are identical.");
-      return;
-    }
-
-    if (!token) {
-      setError("Password reset token is missing or expired. Please request a new link.");
       return;
     }
 
@@ -664,40 +688,76 @@ function ResetPassword({ token, onBack, onSuccess }) {
             </button>
           </div>
         ) : (
-          <form onSubmit={submit}>
-            <label>
-              NEW PASSWORD
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="At least 6 characters"
-                autoComplete="new-password"
-              />
-            </label>
-
-            <label>
-              CONFIRM NEW PASSWORD
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                placeholder="Re-enter your new password"
-                autoComplete="new-password"
-              />
-            </label>
-
-            {error && (
-              <div className="login-error" role="alert">
-                {error}
+          <div>
+            {!hasToken && (
+              <div
+                className="login-error"
+                role="alert"
+                style={{
+                  marginBottom: "16px",
+                  lineHeight: "1.45",
+                  fontSize: "13px",
+                  borderLeft: "3px solid #ff4d4f",
+                  padding: "10px 14px",
+                  backgroundColor: "rgba(255, 77, 79, 0.08)",
+                }}
+              >
+                No active password reset token was detected in your browser URL. If you navigated here directly or the security token expired, please click the link directly inside your email, or request a fresh reset link below.
               </div>
             )}
 
-            <button className="primary-button" type="submit" disabled={loading}>
-              {loading ? "UPDATING PASSWORD..." : "UPDATE PASSWORD"}
-              <span>→</span>
-            </button>
-          </form>
+            {!hasToken && onGoToForgot && (
+              <button
+                type="button"
+                className="primary-button"
+                style={{ width: "100%", marginBottom: "16px" }}
+                onClick={onGoToForgot}
+              >
+                REQUEST FRESH RESET LINK <span>→</span>
+              </button>
+            )}
+
+            <form onSubmit={submit}>
+              <label>
+                NEW PASSWORD
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="At least 6 characters"
+                  autoComplete="new-password"
+                  disabled={loading || !hasToken}
+                />
+              </label>
+
+              <label>
+                CONFIRM NEW PASSWORD
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  placeholder="Re-enter your new password"
+                  autoComplete="new-password"
+                  disabled={loading || !hasToken}
+                />
+              </label>
+
+              {error && (
+                <div className="login-error" role="alert">
+                  {error}
+                </div>
+              )}
+
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={loading || !hasToken}
+              >
+                {loading ? "UPDATING PASSWORD..." : "UPDATE PASSWORD"}
+                <span>→</span>
+              </button>
+            </form>
+          </div>
         )}
 
         <div className="login-security">
