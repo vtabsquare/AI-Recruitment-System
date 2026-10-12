@@ -132,16 +132,25 @@ def delete_token():
 def save_credentials(
     credentials
 ):
-
+    json_data = credentials.to_json()
     with open(
         TOKEN_FILE,
         "w",
         encoding="utf-8"
     ) as token:
+        token.write(json_data)
 
-        token.write(
-            credentials.to_json()
-        )
+    try:
+        b64_token = base64.b64encode(json_data.encode("utf-8")).decode("utf-8")
+        print()
+        print("=" * 60)
+        print("BASE64 TOKEN (For GOOGLE_TOKEN_JSON in .env or Render):")
+        print("=" * 60)
+        print(b64_token)
+        print("=" * 60)
+        print()
+    except Exception:
+        pass
 
 
 # ============================================================

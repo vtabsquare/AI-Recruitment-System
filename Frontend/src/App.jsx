@@ -95,10 +95,6 @@ function App() {
     );
   }, [recoveryToken]);
 
-  const [screen, setScreen] = useState(() => (isResetScreen ? "reset-password" : "home"));
-  const [resetToken, setResetToken] = useState(recoveryToken);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [portal, setPortal] = useState(null);
   const [session, setSession] = useState(() => {
     try {
       return JSON.parse(sessionStorage.getItem("vtab_session") || "null");
@@ -107,13 +103,207 @@ function App() {
     }
   });
 
+  const [portal, setPortal] = useState(() => {
+    if (typeof window === "undefined") return null;
+    const path = window.location.pathname.toLowerCase();
+    if (path === "/manager") return "manager";
+    if (path === "/hr") return "hr";
+    const searchParams = new URLSearchParams(window.location.search);
+    const p = searchParams.get("portal");
+    if (p === "manager" || p === "hr") return p;
+    try {
+      const stored = sessionStorage.getItem("vtab_portal");
+      if (stored === "manager" || stored === "hr") return stored;
+    } catch {}
+    return null;
+  });
+
+  const [screen, setScreen] = useState(() => {
+    if (isResetScreen) return "reset-password";
+    if (typeof window === "undefined") return "home";
+
+    const path = window.location.pathname.toLowerCase();
+    if (path === "/reset-password") return "reset-password";
+    if (path === "/forgot-password") return "forgot-password";
+    if (path === "/signup") return "signup";
+    if (path === "/candidate-ai") return "candidate-ai";
+
+    let storedSession = null;
+    try {
+      storedSession = JSON.parse(sessionStorage.getItem("vtab_session") || "null");
+    } catch {}
+
+    const savedRole = String(storedSession?.staff?.role || "").toLowerCase();
+    const hasToken = Boolean(storedSession?.access_token);
+
+    if (hasToken && (savedRole === "manager" || savedRole === "hr")) {
+      if (path === "/manager") return savedRole === "manager" ? "manager" : "hr";
+      if (path === "/hr") return savedRole === "hr" ? "hr" : "manager";
+      try {
+        const storedScreen = sessionStorage.getItem("vtab_screen");
+        if (storedScreen === "candidate-ai") return "candidate-ai";
+      } catch {}
+      return savedRole === "manager" ? "manager" : "hr";
+    }
+
+    if (path === "/manager" || path === "/hr" || path === "/login") {
+      return "login";
+    }
+
+    try {
+      const storedScreen = sessionStorage.getItem("vtab_screen");
+      if (storedScreen === "candidate-ai") return "candidate-ai";
+      if (storedScreen === "forgot-password") return "forgot-password";
+      if (storedScreen === "signup") return "signup";
+    } catch {}
+
+    return "home";
+  });
+
+  const [resetToken, setResetToken] = useState(recoveryToken);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [sessionRestoring, setSessionRestoring] = useState(() => {
+    return Boolean(session?.access_token && !isResetScreen);
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function restoreSession() {
+      if (!session?.access_token || isResetScreen) {
+        if (isMounted) setSessionRestoring(false);
+        return;
+      }
+
+      try {
+        const result = await apiRequest("/api/auth/me", { method: "GET" }, session.access_token);
+        if (!isMounted) return;
+
+        if (result?.success) {
+          const validatedStaff = result.staff || session.staff;
+          const role = String(validatedStaff?.role || "").toLowerCase();
+
+          if (role === "manager" || role === "hr") {
+            const updatedSession = { ...session, staff: validatedStaff };
+            setSession(updatedSession);
+            try {
+              sessionStorage.setItem("vtab_session", JSON.stringify(updatedSession));
+            } catch {}
+
+            setScreen((prev) => {
+              if (prev === "manager" || prev === "hr") {
+                return role === "manager" ? "manager" : "hr";
+              }
+              const path = window.location.pathname.toLowerCase();
+              if (path === "/manager") return "manager";
+              if (path === "/hr") return "hr";
+              return role === "manager" ? "manager" : "hr";
+            });
+          } else {
+            await handleLogout();
+          }
+        }
+      } catch (error) {
+        if (!isMounted) return;
+
+        if (error?.status === 401 || error?.status === 403) {
+          let refreshed = false;
+          if (session?.refresh_token) {
+            try {
+              const refreshRes = await apiRequest("/api/auth/refresh", {
+                method: "POST",
+                body: JSON.stringify({ refresh_token: session.refresh_token }),
+              });
+              if (refreshRes?.success && refreshRes?.access_token && refreshRes?.staff) {
+                const refreshedSession = {
+                  ...session,
+                  access_token: refreshRes.access_token,
+                  refresh_token: refreshRes.refresh_token || session.refresh_token,
+                  staff: refreshRes.staff,
+                };
+                setSession(refreshedSession);
+                try {
+                  sessionStorage.setItem("vtab_session", JSON.stringify(refreshedSession));
+                } catch {}
+                const role = String(refreshRes.staff.role || "").toLowerCase();
+                setScreen(role === "manager" ? "manager" : "hr");
+                refreshed = true;
+              }
+            } catch (refreshErr) {
+              console.warn("Session refresh attempt failed:", refreshErr);
+            }
+          }
+
+          if (!refreshed) {
+            setSession(null);
+            try {
+              sessionStorage.removeItem("vtab_session");
+              sessionStorage.removeItem("vtab_screen");
+              sessionStorage.removeItem("vtab_portal");
+              sessionStorage.removeItem("vtab_manager_tab");
+              sessionStorage.removeItem("vtab_hr_tab");
+            } catch {}
+            const path = window.location.pathname.toLowerCase();
+            const fallbackPortal = path === "/hr" ? "hr" : "manager";
+            setPortal(fallbackPortal);
+            setScreen("login");
+          }
+        } else {
+          // Temporary network failure or offline: keep existing session and authorized dashboard
+          const role = String(session?.staff?.role || "").toLowerCase();
+          if (role === "manager" || role === "hr") {
+            setScreen((prev) => (prev === "manager" || prev === "hr" ? prev : role));
+          }
+        }
+      } finally {
+        if (isMounted) {
+          setSessionRestoring(false);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const go = (next) => {
     setScreen(next);
     setMenuOpen(false);
+    try {
+      sessionStorage.setItem("vtab_screen", next);
+      if (typeof window !== "undefined" && window.history && window.history.pushState) {
+        if (next === "home") {
+          window.history.pushState(null, "", "/");
+        } else if (next === "manager") {
+          window.history.pushState(null, "", "/manager");
+        } else if (next === "hr") {
+          window.history.pushState(null, "", "/hr");
+        } else if (next === "candidate-ai") {
+          window.history.pushState(null, "", "/candidate-ai");
+        } else if (next === "forgot-password") {
+          window.history.pushState(null, "", "/forgot-password");
+        } else if (next === "signup") {
+          window.history.pushState(null, "", portal ? `/signup?portal=${portal}` : "/signup");
+        } else if (next === "login") {
+          window.history.pushState(null, "", portal ? `/login?portal=${portal}` : "/login");
+        }
+      }
+    } catch {}
   };
 
   const openPortal = (type) => {
+    const currentRole = String(session?.staff?.role || "").toLowerCase();
+    if (session?.access_token && currentRole === type) {
+      go(type);
+      return;
+    }
     setPortal(type);
+    try {
+      sessionStorage.setItem("vtab_portal", type);
+    } catch {}
     setScreen("login");
     setMenuOpen(false);
   };
@@ -141,8 +331,15 @@ function App() {
       setSession(null);
       try {
         sessionStorage.removeItem("vtab_session");
+        sessionStorage.removeItem("vtab_screen");
+        sessionStorage.removeItem("vtab_portal");
+        sessionStorage.removeItem("vtab_manager_tab");
+        sessionStorage.removeItem("vtab_hr_tab");
       } catch {
         // Ignore storage cleanup failures.
+      }
+      if (typeof window !== "undefined" && window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "/");
       }
       go("home");
     }
@@ -156,6 +353,20 @@ function App() {
 
   if (documentToken) {
     return <DocumentSubmission token={documentToken} />;
+  }
+
+  if (sessionRestoring) {
+    return (
+      <div className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <Background />
+        <div className="auth-restoring-card" role="status" aria-live="polite" style={{ textAlign: "center", zIndex: 10 }}>
+          <div className="brand-v" style={{ margin: "0 auto 16px", width: 48, height: 48, fontSize: 24, display: "flex", alignItems: "center", justifyContent: "center" }}>V</div>
+          <p style={{ color: "#a5b4fc", fontSize: "0.95rem", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Restoring secure session...
+          </p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -200,6 +411,15 @@ function App() {
           onBack={() => go("home")}
           onLogin={handleLogin}
           onForgotPassword={() => go("forgot-password")}
+          onSignUp={() => go("signup")}
+        />
+      )}
+
+      {screen === "signup" && (
+        <SignUp
+          initialRole={portal === "manager" ? "manager" : "hr"}
+          onBack={() => go(portal ? "login" : "home")}
+          onLoginClick={() => go("login")}
         />
       )}
 
@@ -248,6 +468,10 @@ function App() {
           onHome={() => go("home")}
           onManager={() => openPortal("manager")}
           onHR={() => openPortal("hr")}
+          onSignUp={() => {
+            setMenuOpen(false);
+            go("signup");
+          }}
         />
       )}
     </div>
@@ -282,14 +506,6 @@ function Home({ onAsk }) {
           VTAB AI coordinates recruitment from application to onboarding,
           while keeping human decisions exactly where they belong.
         </p>
-        <a
-          href="https://www.vtabsquare.com/?demo=1&product=ai-recruitment-system&source=ai-recruitment-demo"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 20, color: "inherit", fontWeight: 700, textDecoration: "underline", textUnderlineOffset: 5 }}
-        >
-          Contact for Demo <span aria-hidden="true">↗</span>
-        </a>
       </section>
 
       <button
@@ -324,7 +540,7 @@ function Home({ onAsk }) {
   );
 }
 
-function Menu({ onClose, onHome, onManager, onHR }) {
+function Menu({ onClose, onHome, onManager, onHR, onSignUp }) {
   return (
     <div className="menu-overlay" onClick={onClose}>
       <aside
@@ -372,6 +588,12 @@ function Menu({ onClose, onHome, onManager, onHR }) {
           <strong>→</strong>
         </button>
 
+        <div className="drawer-label">STAFF REGISTRATION</div>
+
+        <button className="drawer-home" onClick={onSignUp} aria-label="Staff Sign Up">
+          <span>✚</span> Staff Sign Up
+        </button>
+
         <div className="drawer-note">
           <i /> Candidate access is through the AI assistant. No candidate
           portal login is required.
@@ -381,9 +603,10 @@ function Menu({ onClose, onHome, onManager, onHR }) {
   );
 }
 
-function Login({ portal, onBack, onLogin, onForgotPassword }) {
+function Login({ portal, onBack, onLogin, onForgotPassword, onSignUp }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -459,16 +682,64 @@ function Login({ portal, onBack, onLogin, onForgotPassword }) {
 
           <label>
             PASSWORD
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Enter your password"
-              autoComplete="current-password"
-            />
+            <div className="password-input-wrap">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Enter your password"
+                autoComplete="current-password"
+              />
+              <button
+                type="button"
+                className="password-toggle-btn"
+                onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                title={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? (
+                  <svg
+                    width="17"
+                    height="17"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                ) : (
+                  <svg
+                    width="17"
+                    height="17"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </label>
 
-          <div className="login-card-links">
+          <div className="login-card-links" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            {onSignUp ? (
+              <button
+                type="button"
+                className="login-link"
+                onClick={onSignUp}
+              >
+                Need an account? Sign up
+              </button>
+            ) : <span />}
             <button
               type="button"
               className="login-link"
@@ -762,6 +1033,219 @@ function ResetPassword({ token, onBack, onSuccess, onGoToForgot }) {
 
         <div className="login-security">
           <i /> End-to-end encrypted credential update
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function SignUp({ initialRole, onBack, onLoginClick }) {
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [role, setRole] = useState(initialRole === "manager" ? "manager" : "hr");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const submit = async (event) => {
+    event.preventDefault();
+
+    if (!fullName.trim()) {
+      setError("Please enter your full name.");
+      return;
+    }
+    if (fullName.trim().length < 2) {
+      setError("Full name must be at least 2 characters.");
+      return;
+    }
+
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setError("Please enter your company email address.");
+      return;
+    }
+    const emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+    if (!emailRegex.test(cleanEmail)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    if (!password) {
+      setError("Please create a password.");
+      return;
+    }
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    if (role !== "hr" && role !== "manager") {
+      setError("Please select a valid role (HR or Manager).");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const result = await apiRequest("/api/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({
+          full_name: fullName.trim(),
+          email: cleanEmail,
+          password,
+          confirm_password: confirmPassword,
+          role,
+        }),
+      });
+
+      if (!result?.success) {
+        throw new Error(result?.message || "Registration failed.");
+      }
+
+      setSuccess(result.message || "Registration completed successfully.");
+    } catch (err) {
+      setError(err.message || "Registration failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="center-page" id="main-content">
+      <button className="back-link" onClick={onBack}>
+        ← Back
+      </button>
+
+      <div className="login-card">
+        <div className="login-mark">V</div>
+        <div className="eyebrow">VTAB SQUARE / STAFF REGISTRATION</div>
+        <h1>Sign Up</h1>
+        <p>Register as an HR Operations Specialist or Interview Manager</p>
+
+        {success ? (
+          <div>
+            <div className="login-success" role="status" style={{ marginBottom: "20px" }}>
+              {success}
+            </div>
+            <button className="primary-button" type="button" onClick={onLoginClick}>
+              PROCEED TO LOGIN <span>→</span>
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={submit} noValidate>
+            <label>
+              FULL NAME
+              <input
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                placeholder="Enter your full name"
+                autoComplete="name"
+              />
+            </label>
+
+            <label>
+              COMPANY EMAIL
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="Enter your company email"
+                autoComplete="email"
+              />
+            </label>
+
+            <label>
+              ROLE SELECTION
+              <select
+                aria-label="Role selection"
+                value={role}
+                onChange={(event) => setRole(event.target.value)}
+                style={{
+                  width: "100%",
+                  background: "#090c12",
+                  border: "1px solid rgba(255,255,255,.09)",
+                  borderRadius: "10px",
+                  color: "white",
+                  padding: "13px 14px",
+                  outline: "none",
+                }}
+              >
+                <option value="hr">HR Operations (HR)</option>
+                <option value="manager">Interview Manager (Manager)</option>
+              </select>
+            </label>
+
+            {role === "manager" && (
+              <div
+                style={{
+                  fontSize: "11px",
+                  color: "#8c7bff",
+                  background: "rgba(140,123,255,.08)",
+                  padding: "8px 12px",
+                  borderRadius: "8px",
+                  lineHeight: "1.4",
+                }}
+              >
+                ℹ Manager accounts require administrator approval before login.
+              </div>
+            )}
+
+            <label>
+              PASSWORD
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Create a password (min. 6 characters)"
+                autoComplete="new-password"
+              />
+            </label>
+
+            <label>
+              CONFIRM PASSWORD
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Confirm your password"
+                autoComplete="new-password"
+              />
+            </label>
+
+            <div className="login-card-links" style={{ justifyContent: "flex-start" }}>
+              <button
+                type="button"
+                className="login-link"
+                onClick={onLoginClick}
+              >
+                Already have an account? Log in
+              </button>
+            </div>
+
+            {error && (
+              <div className="login-error" role="alert">
+                {error}
+              </div>
+            )}
+
+            <button className="primary-button" type="submit" disabled={loading}>
+              {loading ? "CREATING ACCOUNT..." : "SIGN UP"}
+              <span>→</span>
+            </button>
+          </form>
+        )}
+
+        <div className="login-security">
+          <i /> Authenticated enterprise staff registration
         </div>
       </div>
     </main>
@@ -1863,7 +2347,7 @@ function PortalLayout({
   children,
   error,
 }) {
-  const managerItems = ["Candidate Queue", "Interview Feedback", "Analytics"];
+  const managerItems = ["Candidate Queue", "Interview Feedback", "Analytics", "Staff Approvals"];
   const hrItems = ["Offer Approvals", "Employee Records", "AI Audit Logs"];
   const items = role === "manager" ? managerItems : hrItems;
 
@@ -1899,6 +2383,8 @@ function PortalLayout({
                   ? "◎"
                   : item === "Offer Approvals"
                   ? "◇"
+                  : item === "Staff Approvals"
+                  ? "◈"
                   : "◈"}
               </span>
               {item}
@@ -1957,9 +2443,206 @@ function PortalLayout({
   );
 }
 
+function StaffApprovals({ token, onError }) {
+  const [data, setData] = useState({ pending: [], approved: [] });
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const loadApprovals = async () => {
+    setLoading(true);
+    try {
+      const res = await apiRequest("/api/manager/staff-approvals", {}, token);
+      if (res?.success) {
+        setData({
+          pending: Array.isArray(res.pending) ? res.pending : [],
+          approved: Array.isArray(res.approved) ? res.approved : [],
+        });
+      }
+    } catch (err) {
+      onError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadApprovals();
+  }, []);
+
+  const handleApprove = async (staffId) => {
+    setActionLoading(staffId);
+    setMessage("");
+    setError("");
+    try {
+      const res = await apiRequest(`/api/manager/staff-approvals/${staffId}/approve`, { method: "POST" }, token);
+      if (res?.success) {
+        setMessage(res.message || "Staff member approved successfully.");
+        await loadApprovals();
+      }
+    } catch (err) {
+      setError(err.message || "Failed to approve staff member.");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleReject = async (staffId) => {
+    if (typeof window !== "undefined" && !window.confirm("Are you sure you want to reject and remove this registration request?")) {
+      return;
+    }
+    setActionLoading(staffId);
+    setMessage("");
+    setError("");
+    try {
+      const res = await apiRequest(`/api/manager/staff-approvals/${staffId}/reject`, { method: "POST" }, token);
+      if (res?.success) {
+        setMessage(res.message || "Staff registration request rejected.");
+        await loadApprovals();
+      }
+    } catch (err) {
+      setError(err.message || "Failed to reject staff registration request.");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  return (
+    <div>
+      <div className="section-intro">
+        <div>
+          <h2>Staff Approvals & Access Control</h2>
+          <p>Review self-registered Manager and staff access requests</p>
+        </div>
+        <div className="queue-stat">
+          <b>{data.pending.length}</b>
+          <span>PENDING REQUESTS</span>
+        </div>
+      </div>
+
+      {message && (
+        <div className="login-success" role="status" style={{ marginBottom: "20px" }}>
+          {message}
+        </div>
+      )}
+
+      {error && (
+        <div className="login-error" role="alert" style={{ marginBottom: "20px" }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ marginBottom: "35px" }}>
+        <h3 style={{ fontSize: "16px", marginBottom: "15px", letterSpacing: "0.5px" }}>
+          Pending Approval Requests ({data.pending.length})
+        </h3>
+        {loading ? (
+          <p style={{ color: "var(--muted)", fontSize: "12px" }}>Loading staff approvals...</p>
+        ) : data.pending.length === 0 ? (
+          <div className="candidate-card" style={{ padding: "24px", color: "var(--muted)", fontSize: "13px" }}>
+            No pending registration requests. All registered staff accounts are up to date.
+          </div>
+        ) : (
+          data.pending.map((staff) => (
+            <div key={staff.id} className="candidate-card">
+              <div className="candidate-main">
+                <div className="candidate-avatar">
+                  {staff.role === "manager" ? "M" : "H"}
+                </div>
+                <div>
+                  <h3>{staff.full_name || "Unnamed Staff"}</h3>
+                  <p>{staff.email}</p>
+                  <span className="skill-line">
+                    Requested Role: {staff.role?.toUpperCase()} • Registered: {staff.created_at ? new Date(staff.created_at).toLocaleDateString() : "—"}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <span className="candidate-status-chip" style={{ color: "#ffb020", borderColor: "rgba(255,176,32,.3)", background: "rgba(255,176,32,.06)" }}>
+                  PENDING APPROVAL
+                </span>
+              </div>
+              <div />
+              <div className="candidate-actions">
+                <button
+                  className="approve"
+                  disabled={actionLoading === staff.id}
+                  onClick={() => handleApprove(staff.id)}
+                >
+                  {actionLoading === staff.id ? "Processing..." : "Approve Account"}
+                </button>
+                <button
+                  className="reject"
+                  disabled={actionLoading === staff.id}
+                  onClick={() => handleReject(staff.id)}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div>
+        <h3 style={{ fontSize: "16px", marginBottom: "15px", letterSpacing: "0.5px" }}>
+          Active Staff Directory ({data.approved.length})
+        </h3>
+        <div className="offer-table">
+          <div className="table-head">
+            <div>STAFF MEMBER</div>
+            <div>ROLE</div>
+            <div>STATUS</div>
+            <div>SINCE</div>
+            <div>ACCESS</div>
+          </div>
+          {data.approved.map((staff) => (
+            <div key={staff.id} className="table-row">
+              <div>
+                <b>{staff.full_name}</b>
+                <small>{staff.email}</small>
+              </div>
+              <div>{staff.role?.toUpperCase()}</div>
+              <div className="verified">Active</div>
+              <div>{staff.created_at ? new Date(staff.created_at).toLocaleDateString() : "—"}</div>
+              <div className="verified">Authorized</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ManagerPortal({ session, onHome, onAuthError }) {
-  const [active, setActive] = useState("Candidate Queue");
+  const [active, setActive] = useState(() => {
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const tabParam = searchParams.get("tab");
+      const validTabs = ["Candidate Queue", "Interview Feedback", "Analytics", "Staff Approvals"];
+      const matched = validTabs.find((t) => t.toLowerCase() === tabParam?.toLowerCase());
+      if (matched) return matched;
+      const stored = sessionStorage.getItem("vtab_manager_tab");
+      if (stored && validTabs.includes(stored)) return stored;
+      return "Candidate Queue";
+    } catch {
+      return "Candidate Queue";
+    }
+  });
   const [pageError, setPageError] = useState("");
+
+  const handleSetActive = (tab) => {
+    setActive(tab);
+    try {
+      sessionStorage.setItem("vtab_manager_tab", tab);
+      if (typeof window !== "undefined" && window.history && window.history.replaceState) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("tab", tab);
+        window.history.replaceState(null, "", url.pathname + url.search);
+      }
+    } catch {}
+  };
 
   const handleError = (error) => {
     setPageError(error.message || "Something went wrong.");
@@ -1970,7 +2653,7 @@ function ManagerPortal({ session, onHome, onAuthError }) {
     <PortalLayout
       role="manager"
       active={active}
-      setActive={setActive}
+      setActive={handleSetActive}
       onHome={onHome}
       error={pageError}
     >
@@ -1985,6 +2668,10 @@ function ManagerPortal({ session, onHome, onAuthError }) {
       {active === "Analytics" && (
         <Analytics token={session.access_token} onError={handleError} />
       )}
+
+      {active === "Staff Approvals" && (
+        <StaffApprovals token={session.access_token} onError={handleError} />
+      )}
     </PortalLayout>
   );
 }
@@ -1994,6 +2681,7 @@ function ManagerQueue({ token, onError }) {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [decisionLoading, setDecisionLoading] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(null);
 
   const loadCandidates = async () => {
     setLoading(true);
@@ -2012,6 +2700,57 @@ function ManagerQueue({ token, onError }) {
   useEffect(() => {
     loadCandidates();
   }, []);
+
+  const deleteCandidate = async (item) => {
+    const applicationId = item?.application?.id;
+    const applicationDisplayId =
+      item?.application?.application_id || applicationId;
+    const candidateName =
+      item?.candidate?.candidate_name ||
+      item?.manager_view?.candidate_name ||
+      "this candidate";
+
+    if (!applicationId) {
+      onError(new Error("Application ID is missing."));
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Are you sure you want to delete application ${applicationDisplayId} (${candidateName})? This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    setDeleteLoading(applicationId);
+
+    try {
+      await apiRequest(
+        `/api/candidates/${applicationId}`,
+        {
+          method: "DELETE",
+        },
+        token
+      );
+
+      setCandidates((current) =>
+        current.filter(
+          (candidateItem) => candidateItem?.application?.id !== applicationId
+        )
+      );
+
+      if (selected?.application?.id === applicationId) {
+        setSelected(null);
+      }
+
+      await loadCandidates();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setDeleteLoading(null);
+    }
+  };
 
   const updateDecision = async (item, decision) => {
     const applicationId = item?.application?.id;
@@ -2222,6 +2961,9 @@ function ManagerQueue({ token, onError }) {
           const isUpdating =
             decisionLoading === application.id;
 
+          const isDeleting =
+            deleteLoading === application.id;
+
           return (
             <article
               className="candidate-card"
@@ -2275,7 +3017,7 @@ function ManagerQueue({ token, onError }) {
               <div className="candidate-actions">
                 <button
                   onClick={() => setSelected(item)}
-                  disabled={isUpdating}
+                  disabled={isUpdating || isDeleting}
                 >
                   Review
                 </button>
@@ -2287,6 +3029,7 @@ function ManagerQueue({ token, onError }) {
                   }
                   disabled={
                     isUpdating ||
+                    isDeleting ||
                     status === "approved" ||
                     status === "selected" ||
                     status === "rejected"
@@ -2302,10 +3045,20 @@ function ManagerQueue({ token, onError }) {
                   }
                   disabled={
                     isUpdating ||
+                    isDeleting ||
                     status === "rejected"
                   }
                 >
                   {isUpdating ? "..." : "Reject"}
+                </button>
+
+                <button
+                  className="delete"
+                  onClick={() => deleteCandidate(item)}
+                  disabled={isUpdating || isDeleting}
+                  title="Delete candidate application"
+                >
+                  {isDeleting ? "..." : "Delete"}
                 </button>
               </div>
             </article>
@@ -2414,6 +3167,9 @@ function ManagerQueue({ token, onError }) {
 
               const isUpdating =
                 decisionLoading === application?.id;
+
+              const isDeleting =
+                deleteLoading === application?.id;
 
               return (
                 <>
@@ -2807,7 +3563,7 @@ function ManagerQueue({ token, onError }) {
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
+                      gridTemplateColumns: "1fr 1fr 1fr",
                       gap: 10,
                       marginTop: 22,
                     }}
@@ -2822,6 +3578,7 @@ function ManagerQueue({ token, onError }) {
                       }
                       disabled={
                         isUpdating ||
+                        isDeleting ||
                         status === "approved" ||
                         status === "selected" ||
                         status === "rejected"
@@ -2842,6 +3599,7 @@ function ManagerQueue({ token, onError }) {
                       }
                       disabled={
                         isUpdating ||
+                        isDeleting ||
                         status === "rejected"
                       }
                       style={{
@@ -2853,6 +3611,28 @@ function ManagerQueue({ token, onError }) {
                       {isUpdating
                         ? "UPDATING..."
                         : "REJECT"}
+                    </button>
+
+                    <button
+                      className="primary-button"
+                      onClick={() =>
+                        deleteCandidate(selected)
+                      }
+                      disabled={
+                        isUpdating ||
+                        isDeleting
+                      }
+                      style={{
+                        borderColor:
+                          "rgba(255,90,118,.35)",
+                        color: "#ff5a76",
+                        background:
+                          "rgba(255,90,118,.08)",
+                      }}
+                    >
+                      {isDeleting
+                        ? "DELETING..."
+                        : "DELETE"}
                     </button>
                   </div>
 
@@ -3299,8 +4079,33 @@ function Analytics({ token, onError }) {
 }
 
 function HRPortal({ session, onHome, onAuthError }) {
-  const [active, setActive] = useState("Offer Approvals");
+  const [active, setActive] = useState(() => {
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const tabParam = searchParams.get("tab");
+      const validTabs = ["Offer Approvals", "Employee Records", "AI Audit Logs"];
+      const matched = validTabs.find((t) => t.toLowerCase() === tabParam?.toLowerCase());
+      if (matched) return matched;
+      const stored = sessionStorage.getItem("vtab_hr_tab");
+      if (stored && validTabs.includes(stored)) return stored;
+      return "Offer Approvals";
+    } catch {
+      return "Offer Approvals";
+    }
+  });
   const [pageError, setPageError] = useState("");
+
+  const handleSetActive = (tab) => {
+    setActive(tab);
+    try {
+      sessionStorage.setItem("vtab_hr_tab", tab);
+      if (typeof window !== "undefined" && window.history && window.history.replaceState) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("tab", tab);
+        window.history.replaceState(null, "", url.pathname + url.search);
+      }
+    } catch {}
+  };
 
   const handleError = (error) => {
     setPageError(error.message || "Something went wrong.");
@@ -3311,7 +4116,7 @@ function HRPortal({ session, onHome, onAuthError }) {
     <PortalLayout
       role="hr"
       active={active}
-      setActive={setActive}
+      setActive={handleSetActive}
       onHome={onHome}
       error={pageError}
     >

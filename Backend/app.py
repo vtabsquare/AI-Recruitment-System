@@ -248,6 +248,14 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1)
 
 
+class SignUpRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=150)
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=6, max_length=128)
+    confirm_password: Optional[str] = None
+    role: str = Field(..., min_length=2, max_length=20)
+
+
 class ForgotPasswordRequest(BaseModel):
     email: str = Field(..., min_length=3)
 
@@ -306,6 +314,133 @@ def safe_select_all(table_name: str, order_column: Optional[str] = None):
 
 # ------------------------- AUTH -------------------------
 
+def restore_service_role_auth():
+    """Ensure the backend Supabase client retains its service-role administrative credentials."""
+    try:
+        from config import SUPABASE_KEY
+        if SUPABASE_KEY:
+            if hasattr(supabase, "auth") and hasattr(supabase.auth, "_headers"):
+                supabase.auth._headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
+            if hasattr(supabase, "postgrest") and hasattr(supabase.postgrest, "auth"):
+                supabase.postgrest.auth(SUPABASE_KEY)
+    except Exception:
+        pass
+
+
+@app.post("/api/auth/signup")
+def signup(request: SignUpRequest):
+    try:
+        full_name = request.full_name.strip()
+        email = request.email.strip().lower()
+        password = request.password
+        confirm_password = (request.confirm_password or "").strip()
+        role = request.role.strip().lower()
+
+        if len(full_name) < 2:
+            raise HTTPException(status_code=400, detail="Full name must be at least 2 characters.")
+
+        if not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", email):
+            raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+
+        if len(password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
+        if confirm_password and confirm_password != password:
+            raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+        if role not in {"hr", "manager"}:
+            raise HTTPException(status_code=400, detail="Invalid role. Must be 'hr' or 'manager'.")
+
+        # Check existing staff account
+        existing_staff = (
+            supabase.table("staff_users")
+            .select("id, email")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        if existing_staff.data:
+            raise HTTPException(status_code=400, detail="An account with this email address already exists.")
+
+        # Option A: HR is immediately active; Manager is inactive pending approval
+        is_active = (role == "hr")
+
+        # Ensure admin privileges for user creation
+        restore_service_role_auth()
+
+        # Create Supabase Auth user
+        try:
+            created_user_response = supabase.auth.admin.create_user({
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": {
+                    "full_name": full_name,
+                    "role": role,
+                },
+            })
+            auth_user = getattr(created_user_response, "user", None)
+            if not auth_user or not getattr(auth_user, "id", None):
+                raise HTTPException(status_code=400, detail="Failed to create authentication user.")
+        except HTTPException:
+            raise
+        except Exception as auth_err:
+            err_msg = str(auth_err).lower()
+            if any(w in err_msg for w in ("already", "duplicate", "registered", "exists")):
+                raise HTTPException(status_code=400, detail="An account with this email address already exists.")
+            log_internal_error(auth_err, context="POST /api/auth/signup: supabase create_user")
+            raise HTTPException(status_code=400, detail="Registration failed: unable to create credentials.")
+
+        # Insert into staff_users
+        staff_id = str(uuid.uuid4())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        staff_record = {
+            "id": staff_id,
+            "auth_user_id": str(auth_user.id),
+            "full_name": full_name,
+            "email": email,
+            "role": role,
+            "is_active": is_active,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        try:
+            supabase.table("staff_users").insert(staff_record).execute()
+        except Exception as insert_err:
+            log_internal_error(insert_err, context="POST /api/auth/signup: insert staff_users")
+            try:
+                restore_service_role_auth()
+                supabase.auth.admin.delete_user(str(auth_user.id))
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="Failed to initialize staff profile.")
+
+        log_audit_event(
+            "staff_signup",
+            staff_user_id=staff_id,
+            table_name="staff_users",
+            record_id=staff_id,
+            new_data={"email": email, "role": role, "is_active": is_active},
+        )
+
+        if role == "hr":
+            message = "Registration successful! You can now log in with your credentials."
+        else:
+            message = "Registration submitted successfully! Your Manager account is pending administrator approval before you can log in."
+
+        return {
+            "success": True,
+            "message": message,
+            "role": role,
+            "is_active": is_active,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_internal_error(error, context="POST /api/auth/signup")
+        raise HTTPException(status_code=500, detail=GENERIC_INTERNAL_ERROR)
+
+
 @app.post("/api/auth/login")
 def login(request: LoginRequest):
     try:
@@ -328,7 +463,6 @@ def login(request: LoginRequest):
             supabase.table("staff_users")
             .select("id, full_name, email, role, is_active")
             .or_(f"auth_user_id.eq.{user.id},email.ilike.{email}")
-            .eq("is_active", True)
             .limit(1)
             .execute()
         )
@@ -341,11 +475,33 @@ def login(request: LoginRequest):
                 "staff_login_failed",
                 staff_user_id=getattr(user, "id", None),
                 table_name="staff_users",
-                new_data={"email": email, "reason": "inactive_staff"},
+                new_data={"email": email, "reason": "no_staff_record"},
             )
-            raise HTTPException(status_code=403, detail="Authenticated user is not an active staff member.")
+            raise HTTPException(status_code=403, detail="Staff account not found.")
 
         staff = staff_response.data[0]
+        if not staff.get("is_active"):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            log_audit_event(
+                "staff_login_failed",
+                staff_user_id=staff.get("id"),
+                table_name="staff_users",
+                record_id=staff.get("id"),
+                new_data={"email": email, "reason": "pending_approval" if str(staff.get("role", "")).lower() == "manager" else "inactive_staff"},
+            )
+            if str(staff.get("role", "")).lower() == "manager":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Your account is pending administrator approval before you can log in.",
+                )
+            raise HTTPException(
+                status_code=403,
+                detail="Your account is currently inactive. Please contact support.",
+            )
+
         role = str(staff.get("role", "")).lower()
         if role not in {"manager", "hr", "admin"}:
             try:
@@ -390,6 +546,8 @@ def login(request: LoginRequest):
         if any(w in err_msg for w in ("invalid", "credential", "password", "user", "grant")):
             raise HTTPException(status_code=401, detail="Login failed: Invalid email or password.")
         raise HTTPException(status_code=401, detail="Login failed: Please check your credentials or try again later.")
+    finally:
+        restore_service_role_auth()
 
 
 @app.post("/api/auth/forgot-password")
@@ -620,7 +778,16 @@ def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_
             user_response = supabase.auth.get_user(token)
             user = getattr(user_response, "user", None)
             if user:
-                staff_id = str(user.id)
+                user_email = getattr(user, "email", "") or ""
+                staff_res = (
+                    supabase.table("staff_users")
+                    .select("id")
+                    .or_(f"auth_user_id.eq.{user.id},email.ilike.{user_email}")
+                    .limit(1)
+                    .execute()
+                )
+                if staff_res.data:
+                    staff_id = staff_res.data[0]["id"]
         except Exception:
             staff_id = None
 
@@ -691,6 +858,70 @@ def require_hr(staff=Depends(get_current_staff)):
     if str(staff.get("role", "")).lower() not in {"hr", "admin"}:
         raise HTTPException(status_code=403, detail="HR/Admin access required.")
     return staff
+
+
+@app.get("/api/auth/me")
+def get_me(staff=Depends(get_current_staff)):
+    """
+    Validates active session credentials and returns trusted staff record.
+    Rejects revoked, expired, invalid, or inactive accounts.
+    """
+    return {
+        "success": True,
+        "staff": staff,
+    }
+
+
+class RefreshSessionRequest(BaseModel):
+    refresh_token: str
+
+
+@app.post("/api/auth/refresh")
+def refresh_session_endpoint(req: RefreshSessionRequest):
+    """
+    Refreshes an authenticated session using a Supabase refresh token.
+    Validates that the associated staff member is active and returns refreshed tokens.
+    """
+    refresh_token = req.refresh_token.strip()
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="Refresh token is required.")
+
+    try:
+        auth_response = supabase.auth.refresh_session(refresh_token)
+        session = getattr(auth_response, "session", None)
+        user = getattr(auth_response, "user", None)
+        if not session or not user:
+            raise HTTPException(status_code=401, detail="Session refresh failed.")
+
+        staff_response = (
+            supabase.table("staff_users")
+            .select("id, full_name, email, role, is_active")
+            .or_(f"auth_user_id.eq.{user.id},email.ilike.{user.email.lower()}")
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        if not staff_response.data:
+            raise HTTPException(status_code=403, detail="Staff account not found or inactive.")
+
+        staff = staff_response.data[0]
+        role = str(staff.get("role", "")).lower()
+        if role not in {"manager", "hr", "admin"}:
+            raise HTTPException(status_code=403, detail="Unauthorized staff role.")
+
+        return {
+            "success": True,
+            "message": "Session refreshed successfully.",
+            "staff": staff,
+            "access_token": getattr(session, "access_token", None),
+            "refresh_token": getattr(session, "refresh_token", None),
+            "token_type": "bearer",
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_internal_error(error, context="POST /api/auth/refresh")
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
 
 
 # ------------------------- ROOT -------------------------
@@ -841,6 +1072,78 @@ def get_candidate(candidate_id: str, staff=Depends(require_manager)):
         raise
     except Exception as error:
         log_internal_error(error, context=f"GET /api/candidates/{candidate_id}")
+        raise HTTPException(status_code=500, detail=GENERIC_INTERNAL_ERROR)
+
+
+@app.delete("/api/candidates/{application_id}")
+@app.delete("/api/manager/candidate/{application_id}")
+def delete_candidate_application(application_id: str, staff=Depends(require_manager)):
+    """
+    Allow manager/admin to permanently delete a candidate application from the candidate queue.
+    Cleans up associated child records (documents, interviews, feedback, evaluations) and the application itself.
+    """
+    try:
+        existing = (
+            supabase.table("applications")
+            .select("*")
+            .or_(f"id.eq.{application_id},application_id.eq.{application_id}")
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Candidate application not found.")
+
+        app_record = existing.data[0]
+        app_uuid = app_record["id"]
+        app_display_id = app_record.get("application_id", app_uuid)
+
+        # Cleanup foreign-key related child tables
+        child_tables = [
+            "documents",
+            "candidate_documents",
+            "document_requests",
+            "interview_feedback",
+            "interviews",
+            "ai_evaluations",
+            "candidate_replies",
+            "onboarding_tasks",
+        ]
+        for tbl in child_tables:
+            try:
+                supabase.table(tbl).delete().eq("application_id", app_uuid).execute()
+                if app_display_id != app_uuid:
+                    supabase.table(tbl).delete().eq("application_id", app_display_id).execute()
+            except Exception as cleanup_err:
+                logger.debug(f"Cleanup for table {tbl} on app {app_uuid}: {cleanup_err}")
+
+        # Delete the main application record
+        supabase.table("applications").delete().eq("id", app_uuid).execute()
+
+        try:
+            log_audit_event(
+                "manager_candidate_deleted",
+                staff_user_id=staff.get("id"),
+                table_name="applications",
+                record_id=app_uuid,
+                new_data={
+                    "application_id": app_display_id,
+                    "deleted_by": staff.get("email"),
+                    "role": staff.get("role"),
+                },
+            )
+        except Exception as audit_err:
+            logger.warning(f"Audit log failed for deleted application: {audit_err}")
+
+        return {
+            "success": True,
+            "message": f"Candidate application {app_display_id} deleted successfully.",
+            "deleted_id": app_uuid,
+            "application_id": app_display_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_internal_error(error, context=f"DELETE /api/candidates/{application_id}")
         raise HTTPException(status_code=500, detail=GENERIC_INTERNAL_ERROR)
 
 
@@ -1189,6 +1492,111 @@ def manager_analytics(staff=Depends(require_manager)):
     except Exception as error:
         log_internal_error(error, context="GET /api/manager/analytics")
         raise HTTPException(status_code=500, detail=GENERIC_INTERNAL_ERROR)
+
+
+# ------------------------- STAFF APPROVALS (MANAGER ONLY) -------------------------
+
+@app.get("/api/manager/staff-approvals")
+def get_staff_approvals(staff=Depends(require_manager)):
+    """Fetch pending and active staff members for manager approval management."""
+    try:
+        res = (
+            supabase.table("staff_users")
+            .select("id, auth_user_id, full_name, email, role, is_active, created_at, updated_at")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        all_staff = res.data or []
+        pending = [s for s in all_staff if not s.get("is_active")]
+        approved = [s for s in all_staff if s.get("is_active")]
+        return {
+            "success": True,
+            "pending": pending,
+            "approved": approved,
+        }
+    except Exception as error:
+        log_internal_error(error, context="GET /api/manager/staff-approvals")
+        raise HTTPException(status_code=500, detail="Failed to fetch staff approval requests.")
+
+
+@app.post("/api/manager/staff-approvals/{staff_id}/approve")
+def approve_staff_member(staff_id: str, manager=Depends(require_manager)):
+    """Approve a pending staff member, activating their account for portal login."""
+    try:
+        target = select_one("staff_users", staff_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Staff account not found.")
+        if target.get("is_active"):
+            return {
+                "success": True,
+                "message": f"Staff account {target.get('email')} is already active.",
+                "staff": target,
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        update_res = (
+            supabase.table("staff_users")
+            .update({"is_active": True, "updated_at": now_iso})
+            .eq("id", staff_id)
+            .execute()
+        )
+        updated_record = update_res.data[0] if update_res.data else {**target, "is_active": True}
+        log_audit_event(
+            "staff_approved",
+            staff_user_id=manager.get("id"),
+            table_name="staff_users",
+            record_id=staff_id,
+            new_data={"is_active": True, "approved_by": manager.get("email"), "previous_status": "pending"},
+        )
+        return {
+            "success": True,
+            "message": f"Successfully approved {target.get('full_name')} ({target.get('email')}). The account is now active.",
+            "staff": updated_record,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_internal_error(error, context="POST /api/manager/staff-approvals/approve")
+        raise HTTPException(status_code=500, detail="Failed to approve staff account.")
+
+
+@app.post("/api/manager/staff-approvals/{staff_id}/reject")
+def reject_staff_member(staff_id: str, manager=Depends(require_manager)):
+    """Reject and remove a pending staff registration request."""
+    try:
+        target = select_one("staff_users", staff_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Staff account not found.")
+
+        # Prevent removing active managers
+        if target.get("is_active") and str(target.get("role", "")).lower() in {"manager", "admin"}:
+            raise HTTPException(status_code=400, detail="Cannot reject an existing active Manager account.")
+
+        auth_user_id = target.get("auth_user_id")
+        supabase.table("staff_users").delete().eq("id", staff_id).execute()
+        if auth_user_id:
+            try:
+                restore_service_role_auth()
+                supabase.auth.admin.delete_user(auth_user_id)
+            except Exception as e:
+                log_internal_error(e, context="reject_staff: delete auth user")
+
+        log_audit_event(
+            "staff_rejected",
+            staff_user_id=manager.get("id"),
+            table_name="staff_users",
+            record_id=staff_id,
+            new_data={"email": target.get("email"), "role": target.get("role"), "rejected_by": manager.get("email")},
+        )
+        return {
+            "success": True,
+            "message": f"Registration request for {target.get('full_name')} ({target.get('email')}) has been rejected.",
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_internal_error(error, context="POST /api/manager/staff-approvals/reject")
+        raise HTTPException(status_code=500, detail="Failed to reject staff account.")
 
 
 # ------------------------- HR OFFER APPROVALS -------------------------

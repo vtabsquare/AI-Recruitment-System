@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from '../App.jsx';
 
@@ -203,6 +203,25 @@ describe('AI Recruitment System - UI/UX Tests', () => {
       expect(screen.getByPlaceholderText(/enter your password/i)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /enter portal/i })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /forgot password\?/i })).toBeInTheDocument();
+    });
+
+    it('toggles password visibility between password and text when show/hide button is clicked', async () => {
+      const user = await navigateToLogin('manager');
+      const passwordInput = screen.getByPlaceholderText(/enter your password/i);
+      expect(passwordInput).toHaveAttribute('type', 'password');
+
+      const toggleBtn = screen.getByRole('button', { name: /show password/i });
+      expect(toggleBtn).toBeInTheDocument();
+
+      // Click to show password
+      await user.click(toggleBtn);
+      expect(passwordInput).toHaveAttribute('type', 'text');
+      expect(screen.getByRole('button', { name: /hide password/i })).toBeInTheDocument();
+
+      // Click to hide password again
+      await user.click(screen.getByRole('button', { name: /hide password/i }));
+      expect(passwordInput).toHaveAttribute('type', 'password');
+      expect(screen.getByRole('button', { name: /show password/i })).toBeInTheDocument();
     });
 
     it('shows validation error when submitting with empty email or password', async () => {
@@ -555,6 +574,72 @@ describe('AI Recruitment System - UI/UX Tests', () => {
         expect(screen.getByRole('navigation', { name: /hr portal navigation/i })).toBeInTheDocument();
       });
     });
+
+    it('renders delete option in candidate queue and sends DELETE request when confirmed', async () => {
+      const mockCandidates = {
+        success: true,
+        items: [
+          {
+            application: { id: 'app-del-1', application_id: 'VTAB-2026-TEST', status: 'interview_pending' },
+            candidate: { id: 'cand-del-1', candidate_name: 'Delete Target Candidate', email: 'del@candidate.com' },
+            job_role: { role_name: 'Data Analyst', required_skills: ['SQL'] },
+            ai_evaluation: { decision: 'shortlisted', matched_skills: ['SQL'] },
+          },
+        ],
+      };
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((url, options) => {
+          if (url.includes('/api/auth/login')) {
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({
+                success: true,
+                access_token: 'valid-manager-token',
+                staff: { role: 'manager', full_name: 'Interview Manager' },
+              }),
+            });
+          }
+          if (url.includes('/api/candidates') && options?.method === 'DELETE') {
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({ success: true, message: 'Deleted' }),
+            });
+          }
+          if (url.includes('/api/candidates')) {
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify(mockCandidates),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true }),
+          });
+        })
+      );
+
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(screen.getByRole('button', { name: /open menu/i }));
+      await user.click(screen.getByText('Manager Login'));
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'manager@vtab.com');
+      await user.type(screen.getByPlaceholderText(/enter your password/i), 'secret123');
+      await user.click(screen.getByRole('button', { name: /enter portal/i }));
+
+      const deleteBtn = await screen.findByRole('button', { name: /delete/i });
+      expect(deleteBtn).toBeInTheDocument();
+
+      await user.click(deleteBtn);
+      expect(window.confirm).toHaveBeenCalled();
+    });
   });
 
   // =========================================================================
@@ -724,6 +809,522 @@ describe('AI Recruitment System - UI/UX Tests', () => {
 
       const alert = await screen.findByRole('alert');
       expect(alert).toHaveTextContent(/network connection lost/i);
+    });
+  });
+
+  // =========================================================================
+  // 11. SESSION RESTORATION & REFRESH PERSISTENCE
+  // =========================================================================
+  describe('11. Session Restoration & Refresh Persistence', () => {
+    it('restores Manager Portal on page refresh when a valid manager session exists in sessionStorage', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'valid-mgr-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url) => {
+          if (String(url).includes('/api/auth/me')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () =>
+                JSON.stringify({
+                  success: true,
+                  staff: { role: 'manager', full_name: 'Interview Manager' },
+                }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true, items: [] }),
+          };
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('MANAGER PORTAL')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'Candidate Queue' })).toBeInTheDocument();
+      });
+    });
+
+    it('restores HR Portal on page refresh when a valid HR session exists in sessionStorage', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'valid-hr-token',
+          staff: { role: 'hr', full_name: 'HR Lead' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url) => {
+          if (String(url).includes('/api/auth/me')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () =>
+                JSON.stringify({
+                  success: true,
+                  staff: { role: 'hr', full_name: 'HR Lead' },
+                }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true, items: [] }),
+          };
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('HR PORTAL')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'Offer Approvals' })).toBeInTheDocument();
+      });
+    });
+
+    it('shows accessible restoring loading state while session restoration is in progress', () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'pending-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      // Never resolving promise to test the in-flight restoration state
+      vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => {})));
+
+      render(<App />);
+
+      const loadingStatus = screen.getByRole('status');
+      expect(loadingStatus).toBeInTheDocument();
+      expect(loadingStatus).toHaveTextContent(/restoring secure session/i);
+    });
+
+    it('handles expired/invalid token by clearing session and redirecting to login when refresh fails', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'expired-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          text: async () => JSON.stringify({ detail: 'Invalid or expired access token.' }),
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: /manager portal/i })).toBeInTheDocument();
+        expect(sessionStorage.getItem('vtab_session')).toBeNull();
+      });
+    });
+
+    it('handles revoked token by clearing session and redirecting to login', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'revoked-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          text: async () => JSON.stringify({ detail: 'Session has been logged out. Please log in again.' }),
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: /manager portal/i })).toBeInTheDocument();
+        expect(sessionStorage.getItem('vtab_session')).toBeNull();
+      });
+    });
+
+    it('preserves session across page refresh during temporary network failure', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'valid-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(new Error('Failed to fetch (offline)'))
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('MANAGER PORTAL')).toBeInTheDocument();
+      });
+
+      // Session must NOT be wiped due to a temporary network blip
+      expect(sessionStorage.getItem('vtab_session')).not.toBeNull();
+    });
+
+    it('does not restore session after explicit logout followed by refresh', async () => {
+      // 1. Start with valid session
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'mgr-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ success: true, items: [] }),
+        })
+      );
+
+      const { unmount } = render(<App />);
+
+      const exitBtn = await screen.findByRole('button', { name: /exit portal and return to home/i });
+      await userEvent.setup().click(exitBtn);
+
+      // Verify redirected to Home and session cleared
+      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/intelligent hiring/i);
+      expect(sessionStorage.getItem('vtab_session')).toBeNull();
+
+      unmount();
+
+      // 2. Simulate refresh (mounting again with empty sessionStorage)
+      render(<App />);
+      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/intelligent hiring/i);
+      expect(screen.queryByText('MANAGER PORTAL')).not.toBeInTheDocument();
+    });
+
+    it('preserves nested active tab (Interview Feedback) on direct refresh', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'valid-mgr-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+      sessionStorage.setItem('vtab_manager_tab', 'Interview Feedback');
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url) => {
+          if (String(url).includes('/api/auth/me')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () =>
+                JSON.stringify({
+                  success: true,
+                  staff: { role: 'manager', full_name: 'Interview Manager' },
+                }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true, items: [] }),
+          };
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('MANAGER PORTAL')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'Interview Feedback' })).toBeInTheDocument();
+        const nav = screen.getByRole('navigation', { name: /manager portal navigation/i });
+        const feedbackBtn = within(nav).getByRole('button', { name: /interview feedback/i });
+        expect(feedbackBtn).toHaveAttribute('aria-current', 'page');
+      });
+    });
+
+    it('preserves nested active tab in HR Portal (AI Audit Logs) on direct refresh', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'valid-hr-token',
+          staff: { role: 'hr', full_name: 'HR Lead' },
+        })
+      );
+      sessionStorage.setItem('vtab_hr_tab', 'AI Audit Logs');
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url) => {
+          if (String(url).includes('/api/auth/me')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () =>
+                JSON.stringify({
+                  success: true,
+                  staff: { role: 'hr', full_name: 'HR Lead' },
+                }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true, items: [] }),
+          };
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('HR PORTAL')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'AI Audit Logs' })).toBeInTheDocument();
+        const auditLogsBtn = screen.getByRole('button', { name: /ai audit logs/i });
+        expect(auditLogsBtn).toHaveAttribute('aria-current', 'page');
+      });
+    });
+
+    it('refreshes token via /api/auth/refresh when access token is expired and refresh token is valid', async () => {
+      sessionStorage.setItem(
+        'vtab_session',
+        JSON.stringify({
+          access_token: 'expired-access-token',
+          refresh_token: 'valid-refresh-token',
+          staff: { role: 'manager', full_name: 'Interview Manager' },
+        })
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url, opts) => {
+          if (String(url).includes('/api/auth/me')) {
+            return {
+              ok: false,
+              status: 401,
+              text: async () => JSON.stringify({ detail: 'Invalid or expired access token.' }),
+            };
+          }
+          if (String(url).includes('/api/auth/refresh')) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () =>
+                JSON.stringify({
+                  success: true,
+                  access_token: 'new-valid-access-token',
+                  refresh_token: 'new-valid-refresh-token',
+                  staff: { role: 'manager', full_name: 'Interview Manager' },
+                }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ success: true, items: [] }),
+          };
+        })
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText('MANAGER PORTAL')).toBeInTheDocument();
+      });
+
+      const saved = JSON.parse(sessionStorage.getItem('vtab_session') || '{}');
+      expect(saved.access_token).toBe('new-valid-access-token');
+    });
+  });
+
+  // =========================================================================
+  // 11. STAFF SIGN UP & MANAGER APPROVALS FLOW
+  // =========================================================================
+  describe('11. Staff Sign Up & Manager Approvals', () => {
+    it('navigates to Sign Up screen from Login and renders all required fields', async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      // Open menu and go to Manager login
+      await user.click(screen.getByRole('button', { name: /open menu/i }));
+      await user.click(screen.getByText('Manager Login'));
+
+      // Click Sign Up link
+      expect(screen.getByRole('button', { name: /need an account\? sign up/i })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /need an account\? sign up/i }));
+
+      // Check fields
+      expect(screen.getByRole('heading', { name: /sign up/i })).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/enter your full name/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/enter your company email/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/role selection/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/create a password/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/confirm your password/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /sign up/i })).toBeInTheDocument();
+    });
+
+    it('shows validation error when Full Name is missing or too short', async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+      expect(screen.getByRole('alert')).toHaveTextContent(/please enter your full name/i);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'A');
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+      expect(screen.getByRole('alert')).toHaveTextContent(/at least 2 characters/i);
+    });
+
+    it('shows validation error when email format is invalid', async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'John Doe');
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'staff@invalid');
+      await user.type(screen.getByPlaceholderText(/create a password/i), 'password123');
+      await user.type(screen.getByPlaceholderText(/confirm your password/i), 'password123');
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+      expect(screen.getByRole('alert')).toHaveTextContent(/valid email address/i);
+    });
+
+    it('shows validation error when password is under 6 characters', async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'John Doe');
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'john@example.com');
+      await user.type(screen.getByPlaceholderText(/create a password/i), '12345');
+      await user.type(screen.getByPlaceholderText(/confirm your password/i), '12345');
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+      expect(screen.getByRole('alert')).toHaveTextContent(/at least 6 characters/i);
+    });
+
+    it('shows validation error when passwords do not match', async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'John Doe');
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'john@example.com');
+      await user.type(screen.getByPlaceholderText(/create a password/i), 'password123');
+      await user.type(screen.getByPlaceholderText(/confirm your password/i), 'different123');
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+      expect(screen.getByRole('alert')).toHaveTextContent(/passwords do not match/i);
+    });
+
+    it('successfully registers HR user and displays success state', async () => {
+      const user = userEvent.setup();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              success: true,
+              message: 'Registration successful! You can now log in with your credentials.',
+              role: 'hr',
+              is_active: true,
+            }),
+        })
+      );
+
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'Sarah HR');
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'sarah@vtab.com');
+      await user.selectOptions(screen.getByLabelText(/role selection/i), 'hr');
+      await user.type(screen.getByPlaceholderText(/create a password/i), 'password123');
+      await user.type(screen.getByPlaceholderText(/confirm your password/i), 'password123');
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('status')).toHaveTextContent(/registration successful/i);
+      });
+      expect(screen.getByRole('button', { name: /proceed to login/i })).toBeInTheDocument();
+    });
+
+    it('successfully registers Manager user and displays pending approval status', async () => {
+      const user = userEvent.setup();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              success: true,
+              message: 'Registration submitted successfully! Your Manager account is pending administrator approval before you can log in.',
+              role: 'manager',
+              is_active: false,
+            }),
+        })
+      );
+
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.type(screen.getByPlaceholderText(/enter your full name/i), 'Alex Manager');
+      await user.type(screen.getByPlaceholderText(/enter your company email/i), 'alex@vtab.com');
+      await user.selectOptions(screen.getByLabelText(/role selection/i), 'manager');
+      await user.type(screen.getByPlaceholderText(/create a password/i), 'password123');
+      await user.type(screen.getByPlaceholderText(/confirm your password/i), 'password123');
+
+      await user.click(screen.getByRole('button', { name: /sign up/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('status')).toHaveTextContent(/pending administrator approval/i);
+      });
+    });
+
+    it('navigates back to Login when "Already have an account? Log in" is clicked', async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, '', '/signup');
+      render(<App />);
+
+      await user.click(screen.getByRole('button', { name: /already have an account\? log in/i }));
+
+      expect(screen.getByRole('heading', { name: /portal|operations|access/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /enter portal/i })).toBeInTheDocument();
+    });
+
+    it('renders Staff Approvals tab in Manager Portal navigation', async () => {
+      await loginAs('manager', 'Interview Manager');
+
+      expect(screen.getByRole('button', { name: /staff approvals/i })).toBeInTheDocument();
     });
   });
 });

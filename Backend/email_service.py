@@ -13,6 +13,7 @@ from config import (
     BREVO_API_KEY,
     BREVO_SENDER_EMAIL,
     BREVO_SENDER_NAME,
+    COMPANY_EMAIL,
 )
 
 
@@ -178,6 +179,13 @@ def send_email(
                     recipient_name
             }
         ],
+
+        "replyTo": {
+            "email":
+                COMPANY_EMAIL or BREVO_SENDER_EMAIL or "vitabsquare@gmail.com",
+            "name":
+                BREVO_SENDER_NAME
+        },
 
         "subject":
             subject,

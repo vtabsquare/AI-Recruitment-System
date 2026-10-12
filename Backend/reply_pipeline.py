@@ -226,13 +226,14 @@ def detect_exact_slot(text):
     Detect a company slot from a candidate reply.
 
     Accepted examples:
-        10:00 AM
-        10:30 AM
-        11 AM
-        12:00 PM
-        12:30 PM
-        1:00 PM
-        1:30 PM
+        10:00 AM, 10.00 AM, 10 AM, 10:00am, 10:00
+        10:30 AM, 10.30 AM, 10:30
+        11 AM, 11:00 AM, 11.00 AM, 11:00
+        11:30 AM, 11.30 AM, 11:30
+        12:00 PM, 12.00 PM, 12:00
+        12:30 PM, 12.30 PM, 12:30
+        1:00 PM, 1.00 PM, 1:00
+        1:30 PM, 1.30 PM, 1:30
     """
 
     if not text:
@@ -240,20 +241,29 @@ def detect_exact_slot(text):
 
     text = str(text).upper()
 
-    # First look for a complete time with AM/PM.
+    # 1. Match with explicit AM/PM (supports colon and dot separator)
     match = re.search(
-        r"\b(10|11|12|1)(?::([0-5][0-9]))?\s*(AM|PM)\b",
+        r"\b(10|11|12|1)(?:[:.]([0-5][0-9]))?\s*(AM|PM)\b",
         text,
     )
+    if match:
+        hour = match.group(1)
+        minute = match.group(2) or "00"
+        meridiem = match.group(3)
+        return f"{hour}:{minute} {meridiem}"
 
-    if not match:
-        return None
+    # 2. Match standard company slot where candidate omitted AM/PM
+    match_no_meridiem = re.search(
+        r"\b(10|11|12|1)[:.]([0-5][0-9])\b",
+        text,
+    )
+    if match_no_meridiem:
+        hour = match_no_meridiem.group(1)
+        minute = match_no_meridiem.group(2)
+        meridiem = "AM" if hour in ("10", "11") else "PM"
+        return f"{hour}:{minute} {meridiem}"
 
-    hour = match.group(1)
-    minute = match.group(2) or "00"
-    meridiem = match.group(3)
-
-    return f"{hour}:{minute} {meridiem}"
+    return None
 
 
 def normalize_slot_label(slot):
@@ -1685,7 +1695,7 @@ def get_candidate_replies(service):
         ) + "}"
 
         query = (
-            f"in:inbox to:{COMPANY_EMAIL} "
+            f"in:inbox "
             f"newer_than:2d {sender_query}"
         )
 

@@ -121,35 +121,32 @@ def get_gmail_service():
                 json.loads(token_data),
                 SCOPES
             )
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception as refresh_err:
+                    print("[Gmail] GOOGLE_TOKEN_JSON refresh failed:", refresh_err)
+                    creds = None
         except Exception as error:
             print("[Gmail] Could not load token from GOOGLE_TOKEN_JSON:", error)
-            _last_failed_token = current_token_ref
-            return None
+            creds = None
 
-    # --- Local dev: load from file ---
-    elif os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    # --- Local dev / Fallback: load from token.json file ---
+    if (not creds or not creds.valid) and os.path.exists("token.json"):
+        try:
+            file_creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+            if file_creds and file_creds.expired and file_creds.refresh_token:
+                file_creds.refresh(Request())
+                with open("token.json", "w", encoding="utf-8") as token_out:
+                    token_out.write(file_creds.to_json())
+            if file_creds and file_creds.valid:
+                creds = file_creds
+        except Exception as file_err:
+            print("[Gmail] Could not load token from token.json:", file_err)
 
-    else:
-        return None
-
-    # Refresh token if expired
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-                # Save refreshed token back to file (local dev only)
-                if not token_env and os.path.exists("token.json"):
-                    with open("token.json", "w", encoding="utf-8") as token:
-                        token.write(creds.to_json())
-                _last_failed_token = None
-            except Exception:
-                _last_failed_token = current_token_ref
-                return None
-        else:
-            # Cannot open browser on server — fail gracefully
-            _last_failed_token = current_token_ref
-            return None
+        _last_failed_token = current_token_ref
+        return None
 
     _last_failed_token = None
     return build("gmail", "v1", credentials=creds)
