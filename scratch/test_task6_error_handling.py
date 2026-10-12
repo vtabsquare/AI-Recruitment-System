@@ -83,7 +83,10 @@ mock_staff_data = [{
 
 with patch.object(supabase.auth, "sign_in_with_password", return_value=mock_auth_res), \
      patch.object(supabase, "table") as mock_table:
-    mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = mock_staff_data
+    mock_staff_query = MagicMock()
+    mock_staff_query.execute.return_value.data = mock_staff_data
+    mock_table.return_value.select.return_value.or_.return_value.limit.return_value = mock_staff_query
+    mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_staff_query
     resp = client.post("/api/auth/login", json={"email": "manager@vtab.com", "password": "Password123!"})
     check("Successful login returns 200 OK", resp.status_code == 200)
     data = resp.json()

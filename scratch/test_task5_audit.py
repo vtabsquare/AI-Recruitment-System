@@ -129,12 +129,13 @@ def run_tests():
         if table_name == "audit_logs":
             mock_t.insert.return_value.execute.side_effect = RuntimeError("Supabase connection timeout / DB down")
         elif table_name == "staff_users":
-            mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            mock_staff_query = MagicMock()
+            mock_staff_query.execute.return_value.data = [
                 {"id": "staff_123", "full_name": "Test Manager", "email": "manager@vtabsquare.com", "role": "manager", "is_active": True}
             ]
-            mock_t.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
-                {"id": "staff_123", "email": "manager@vtabsquare.com", "is_active": True}
-            ]
+            mock_t.select.return_value.or_.return_value.limit.return_value = mock_staff_query
+            mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_staff_query
+            mock_t.select.return_value.eq.return_value.eq.return_value.limit.return_value = mock_staff_query
         return mock_t
 
     with patch.object(supabase, "table", side_effect=mock_table_failing_audit):
@@ -217,7 +218,10 @@ def run_tests():
 
     def mock_table_empty_staff(table_name):
         mock_t = MagicMock()
-        mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
+        mock_staff_query = MagicMock()
+        mock_staff_query.execute.return_value.data = []
+        mock_t.select.return_value.or_.return_value.limit.return_value = mock_staff_query
+        mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_staff_query
         return mock_t
 
     with patch.object(supabase.auth, "sign_in_with_password", return_value=mock_auth_res), \
@@ -256,12 +260,13 @@ def run_tests():
                 return mock_exec
             mock_t.insert = fake_insert
         elif table_name == "staff_users":
-            mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            mock_staff_query = MagicMock()
+            mock_staff_query.execute.return_value.data = [
                 {"id": "staff_123", "full_name": "Test Manager", "email": "manager@vtabsquare.com", "role": "manager", "is_active": True}
             ]
-            mock_t.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
-                {"id": "staff_123", "email": "manager@vtabsquare.com", "is_active": True}
-            ]
+            mock_t.select.return_value.or_.return_value.limit.return_value = mock_staff_query
+            mock_t.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_staff_query
+            mock_t.select.return_value.eq.return_value.eq.return_value.limit.return_value = mock_staff_query
         return mock_t
 
     recorded_inserts.clear()

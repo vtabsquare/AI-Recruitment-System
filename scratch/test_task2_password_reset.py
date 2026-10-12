@@ -51,7 +51,9 @@ class TestPasswordResetAndLogin(unittest.TestCase):
              patch.object(supabase, "table") as mock_table:
 
             mock_query = MagicMock()
-            mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = mock_staff_data
+            mock_query.execute.return_value.data = mock_staff_data
+            mock_table.return_value.select.return_value.or_.return_value.limit.return_value = mock_query
+            mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_query
 
             resp = self.client.post("/api/auth/login", json={
                 "email": "manager@vtab.com",
@@ -88,7 +90,10 @@ class TestPasswordResetAndLogin(unittest.TestCase):
              patch.object(supabase, "table") as mock_table:
 
             # No active staff found
-            mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
+            mock_query = MagicMock()
+            mock_query.execute.return_value.data = []
+            mock_table.return_value.select.return_value.or_.return_value.limit.return_value = mock_query
+            mock_table.return_value.select.return_value.or_.return_value.eq.return_value.limit.return_value = mock_query
 
             resp = self.client.post("/api/auth/login", json={
                 "email": "inactive@vtab.com",

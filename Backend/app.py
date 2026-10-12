@@ -477,7 +477,7 @@ def login(request: LoginRequest):
                 table_name="staff_users",
                 new_data={"email": email, "reason": "no_staff_record"},
             )
-            raise HTTPException(status_code=403, detail="Staff account not found.")
+            raise HTTPException(status_code=403, detail="Staff account not found or not an active staff member.")
 
         staff = staff_response.data[0]
         if not staff.get("is_active"):
@@ -499,7 +499,7 @@ def login(request: LoginRequest):
                 )
             raise HTTPException(
                 status_code=403,
-                detail="Your account is currently inactive. Please contact support.",
+                detail="Your account is currently inactive (not an active staff member). Please contact support.",
             )
 
         role = str(staff.get("role", "")).lower()
